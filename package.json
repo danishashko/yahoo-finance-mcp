@@ -1,0 +1,45 @@
+{
+  "name": "yahoo-finance-mcp-server",
+  "version": "1.0.0",
+  "description": "Yahoo Finance MCP Server - Real-time stock data, company info, financial statements, and market analysis via Model Context Protocol",
+  "main": "yahoo_finance_mcp.py",
+  "bin": {
+    "yahoo-finance-mcp": "./yahoo_finance_mcp.py"
+  },
+  "scripts": {
+    "test": "python test_installation.py"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "yahoo-finance",
+    "stocks",
+    "finance",
+    "market-data",
+    "stock-prices",
+    "financial-data",
+    "yfinance",
+    "claude",
+    "ai",
+    "llm"
+  ],
+  "author": "Daniel Shashko",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/danishashko/yahoo-finance-mcp.git"
+  },
+  "homepage": "https://github.com/danishashko/yahoo-finance-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/danishashko/yahoo-finance-mcp/issues"
+  },
+  "engines": {
+    "python": ">=3.10"
+  },
+  "files": [
+    "yahoo_finance_mcp.py",
+    "requirements.txt",
+    "README.md",
+    "LICENSE"
+  ]
+}

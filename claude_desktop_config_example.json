@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "yahoo-finance": {
+      "command": "python3",
+      "args": ["/REPLACE/WITH/ACTUAL/PATH/TO/yahoo_finance_mcp.py"]
+    }
+  }
+}
