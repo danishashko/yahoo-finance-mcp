@@ -28,7 +28,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/danishashko/yahoo-finance-mcp.git"
+    "url": "git+https://github.com/danishashko/yahoo-finance-mcp.git"
   },
   "homepage": "https://github.com/danishashko/yahoo-finance-mcp#readme",
   "bugs": {
@@ -43,6 +43,7 @@
     "yahoo_finance_mcp.py",
     "requirements.txt",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ]
 }
