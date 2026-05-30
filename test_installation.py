@@ -16,21 +16,24 @@ print()
 # Test 1: Python Version
 print("Test 1: Checking Python version...")
 version = sys.version_info
-if version.major >= 3 and version.minor >= 8:
+if version.major > 3 or (version.major == 3 and version.minor >= 10):
     print(f"✅ Python {version.major}.{version.minor}.{version.micro} - OK")
 else:
-    print(f"❌ Python {version.major}.{version.minor}.{version.micro} - Need Python 3.8+")
+    print(
+        f"❌ Python {version.major}.{version.minor}.{version.micro} - Need Python 3.10+"
+    )
     sys.exit(1)
 print()
 
 # Test 2: Required Packages
 print("Test 2: Checking required packages...")
 required_packages = {
-    'yfinance': 'yfinance',
-    'pandas': 'pandas',
-    'pydantic': 'pydantic',
-    'httpx': 'httpx',
-    'mcp': 'mcp'
+    "yfinance": "yfinance",
+    "pandas": "pandas",
+    "tabulate": "tabulate",
+    "pydantic": "pydantic",
+    "httpx": "httpx",
+    "mcp": "mcp",
 }
 
 all_packages_ok = True
@@ -53,11 +56,12 @@ print()
 print("Test 3: Testing Yahoo Finance connection...")
 try:
     import yfinance as yf
+
     ticker = yf.Ticker("AAPL")
     info = ticker.info
-    price = info.get('currentPrice', info.get('regularMarketPrice', 'N/A'))
-    
-    if price != 'N/A':
+    price = info.get("currentPrice", info.get("regularMarketPrice", "N/A"))
+
+    if price != "N/A":
         print(f"✅ Successfully fetched Apple stock price: ${price}")
     else:
         print("⚠️  Connected but couldn't get price (this is OK)")
@@ -70,14 +74,14 @@ print()
 # Test 4: MCP Server File
 print("Test 4: Checking MCP server file...")
 import os
+
 server_file = "yahoo_finance_mcp.py"
 if os.path.exists(server_file):
     print(f"✅ {server_file} - Found")
-    
-    # Check if it's valid Python
+
     try:
-        with open(server_file, 'r') as f:
-            compile(f.read(), server_file, 'exec')
+        with open(server_file, "r", encoding="utf-8") as f:
+            compile(f.read(), server_file, "exec")
         print(f"✅ {server_file} - Valid Python syntax")
     except SyntaxError as e:
         print(f"❌ {server_file} - Syntax error: {e}")
@@ -93,7 +97,7 @@ if all_packages_ok:
     print("🎉 All tests passed! Your installation looks good!")
     print()
     print("Next steps:")
-    print("1. Configure Claude Desktop (see SETUP_GUIDE.md)")
+    print("1. Configure Claude Desktop (see README.md)")
     print("2. Restart Claude Desktop")
     print("3. Try asking: 'What's the price of Apple stock?'")
 else:

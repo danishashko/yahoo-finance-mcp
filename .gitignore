@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.python-version
+
+# Node
+node_modules/
+
+# Caches / OS
+.cache/
+.DS_Store
+Thumbs.db
+
+# Claude Code session artifacts
+HANDOFF.md
+
+# Local QA scratch
+_qa_*.py
+_qa_*.txt
+_*.txt

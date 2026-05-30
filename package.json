@@ -1,10 +1,11 @@
 {
   "name": "yahoo-finance-mcp-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Yahoo Finance MCP Server - Real-time stock data, company info, financial statements, and market analysis via Model Context Protocol",
-  "main": "yahoo_finance_mcp.py",
+  "main": "bin/cli.js",
   "bin": {
-    "yahoo-finance-mcp": "./yahoo_finance_mcp.py"
+    "yahoo-finance-mcp-server": "bin/cli.js",
+    "yahoo-finance-mcp": "bin/cli.js"
   },
   "scripts": {
     "test": "python test_installation.py"
@@ -34,9 +35,11 @@
     "url": "https://github.com/danishashko/yahoo-finance-mcp/issues"
   },
   "engines": {
+    "node": ">=16",
     "python": ">=3.10"
   },
   "files": [
+    "bin/",
     "yahoo_finance_mcp.py",
     "requirements.txt",
     "README.md",

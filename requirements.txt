@@ -1,8 +1,9 @@
 # Yahoo Finance MCP Server Requirements
 # Install all dependencies with: pip install -r requirements.txt
 
-yfinance>=0.2.32
+yfinance>=0.2.40
 pandas>=1.5.0
-mcp>=0.1.0
+tabulate>=0.9.0
+mcp>=1.2.0
 pydantic>=2.0.0
 httpx>=0.24.0

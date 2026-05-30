@@ -32,7 +32,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 }
 ```
 
-That's it! The server will auto-install Python dependencies on first run.
+On first run the npx launcher creates an isolated Python environment and installs the dependencies automatically (this one-time setup can take a minute). You only need **Python 3.10+** and **Node.js 16+** installed.
 
 ### Or install globally
 
@@ -58,12 +58,12 @@ npm install -g yahoo-finance-mcp-server
 
 If you prefer to install manually:
 
-### Step 2: Download the Server File
+### Step 1: Download the Server File
 
 1. Save the `yahoo_finance_mcp.py` file to a folder on your computer
 2. Remember where you saved it (you'll need this path)
 
-### Step 3: Configure Claude Desktop
+### Step 2: Configure Claude Desktop
 
 To use this server with Claude Desktop, you need to add it to your configuration file.
 
@@ -107,7 +107,7 @@ To use this server with Claude Desktop, you need to add it to your configuration
 
 **Important:** Replace `/path/to/yahoo_finance_mcp.py` with the actual path where you saved the file!
 
-### Step 4: Restart Claude Desktop
+### Step 3: Restart Claude Desktop
 
 Close Claude Desktop completely and open it again. The Yahoo Finance tools should now be available!
 
@@ -200,12 +200,12 @@ Here are some example questions you can ask once the server is running:
 
 **Solution:** Install the required libraries:
 ```bash
-pip install yfinance pandas mcp
+pip install yfinance pandas tabulate mcp
 ```
 
 Or on Mac/Linux:
 ```bash
-pip3 install yfinance pandas mcp
+pip3 install yfinance pandas tabulate mcp
 ```
 
 ### "No such file or directory"
