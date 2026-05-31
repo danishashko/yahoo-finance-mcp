@@ -1,6 +1,6 @@
 {
   "name": "yahoo-finance-mcp-server",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Yahoo Finance MCP Server - Real-time stock data, company info, financial statements, and market analysis via Model Context Protocol",
   "main": "bin/cli.js",
   "bin": {

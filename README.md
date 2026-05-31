@@ -153,7 +153,7 @@ pip install yfinance pandas tabulate mcp pydantic httpx
 
 ## 📋 Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history. The latest release is **v1.1.0**, which fixed tool input validation, repaired analyst recommendations and dividend yield, and made `npx` installation work end to end.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history. The core fixes (tool input validation, analyst recommendations, dividend yield, working `npx` install) landed in **v1.1.0**.
 
 ## 📚 Resources
 

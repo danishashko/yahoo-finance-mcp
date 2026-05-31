@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-05-31
+
+Documentation and packaging only. No runtime code changes; behavior is
+identical to 1.1.0.
+
+### Changed
+
+- Reworked the README: clearer structure, a tools table with parameters and
+  supported `period`/`interval` values, example prompts, and a note clarifying
+  that the repository name (`yahoo-finance-mcp`) differs from the npm package
+  name (`yahoo-finance-mcp-server`).
+- Added shields.io badges, including a monthly-downloads pill and a Python
+  version badge.
+- Normalized `repository.url` to the `git+https://` form npm expects.
+
+### Added
+
+- This `CHANGELOG.md`, now shipped in the npm tarball.
+
 ## [1.1.0] - 2026-05-30
 
 A full QA pass that fixed several bugs which broke core functionality, and made
@@ -56,5 +75,6 @@ end by driving the real MCP server over stdio against live Yahoo Finance data.
   `get_analyst_recommendations`.
 - Markdown and JSON output formats.
 
+[1.1.1]: https://github.com/danishashko/yahoo-finance-mcp/releases/tag/v1.1.1
 [1.1.0]: https://github.com/danishashko/yahoo-finance-mcp/releases/tag/v1.1.0
 [1.0.0]: https://github.com/danishashko/yahoo-finance-mcp/releases/tag/v1.0.0
