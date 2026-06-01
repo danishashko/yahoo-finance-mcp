@@ -31,6 +31,46 @@ CHARACTER_LIMIT = 25000  # Maximum response size in characters
 
 
 # ============================================================================
+# SHARED HTTP SESSION
+# ============================================================================
+#
+# Yahoo Finance aggressively rate-limits plain HTTP clients (HTTP 429 /
+# YFRateLimitError). The community-proven mitigation is a single curl_cffi
+# session with browser impersonation, reused across every Ticker call so the
+# crumb/cookie handshake happens once. We build it lazily and degrade
+# gracefully to yfinance's default session if curl_cffi is unavailable.
+
+_SESSION = None
+_SESSION_TRIED = False
+
+
+def _get_session():
+    """Return a shared curl_cffi session, or None to use yfinance's default."""
+    global _SESSION, _SESSION_TRIED
+    if _SESSION_TRIED:
+        return _SESSION
+    _SESSION_TRIED = True
+    try:
+        from curl_cffi import requests as _creq
+
+        _SESSION = _creq.Session(impersonate="chrome")
+    except Exception:
+        _SESSION = None  # fall back to yfinance's built-in session
+    return _SESSION
+
+
+def make_ticker(symbol: str) -> "yf.Ticker":
+    """Create a yfinance Ticker bound to the shared session when available."""
+    session = _get_session()
+    if session is not None:
+        try:
+            return yf.Ticker(symbol, session=session)
+        except Exception:
+            pass
+    return yf.Ticker(symbol)
+
+
+# ============================================================================
 # ENUMS
 # ============================================================================
 
@@ -76,6 +116,23 @@ class Interval(str, Enum):
     THREE_MONTHS = "3mo"
 
 
+class OptionType(str, Enum):
+    """Which side of the options chain to return."""
+
+    CALLS = "calls"
+    PUTS = "puts"
+    BOTH = "both"
+
+
+class HolderType(str, Enum):
+    """Category of ownership data."""
+
+    INSTITUTIONAL = "institutional"
+    MUTUALFUND = "mutualfund"
+    MAJOR = "major"
+    INSIDER_TRANSACTIONS = "insider_transactions"
+
+
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
@@ -84,6 +141,26 @@ class Interval(str, Enum):
 def _norm_ticker(value: str) -> str:
     """Normalize a single ticker symbol."""
     return value.strip().upper()
+
+
+def _error(what: str, ticker: str, exc: Exception) -> str:
+    """Build a consistent, helpful error message for a failed tool call.
+
+    Detects Yahoo rate-limiting and gives specific guidance for it.
+    """
+    name = type(exc).__name__
+    if "RateLimit" in name or "Too Many Requests" in str(exc):
+        return (
+            f"Yahoo Finance is rate-limiting requests right now (fetching {what} for {ticker}).\n\n"
+            "**Troubleshooting:**\n"
+            "- Wait a minute and try again\n"
+            "- Avoid making many requests in quick succession"
+        )
+    msg = f"Error fetching {what} for {ticker}: {str(exc)}\n\n"
+    msg += "**Troubleshooting:**\n"
+    msg += "- Verify the ticker symbol is correct\n"
+    msg += f"- {what.capitalize()} may not be available for this symbol"
+    return msg
 
 
 def safe_get(data: Dict[str, Any], key: str, default: Any = "N/A") -> Any:
@@ -247,7 +324,7 @@ async def get_stock_quote(
     """
     ticker = _norm_ticker(ticker)
     try:
-        ticker_obj = yf.Ticker(ticker)
+        ticker_obj = make_ticker(ticker)
         info = ticker_obj.info
 
         # Get fast info for real-time data
@@ -406,7 +483,7 @@ async def get_historical_prices(
     """
     ticker = _norm_ticker(ticker)
     try:
-        ticker_obj = yf.Ticker(ticker)
+        ticker_obj = make_ticker(ticker)
         hist = ticker_obj.history(period=period.value, interval=interval.value)
 
         if hist.empty:
@@ -518,7 +595,7 @@ async def get_company_info(
     """
     ticker = _norm_ticker(ticker)
     try:
-        ticker_obj = yf.Ticker(ticker)
+        ticker_obj = make_ticker(ticker)
         info = ticker_obj.info
 
         if response_format == ResponseFormat.MARKDOWN:
@@ -658,7 +735,7 @@ async def get_financial_statements(
     """
     ticker = _norm_ticker(ticker)
     try:
-        ticker_obj = yf.Ticker(ticker)
+        ticker_obj = make_ticker(ticker)
 
         income_stmt = ticker_obj.income_stmt
         balance_sheet = ticker_obj.balance_sheet
@@ -764,7 +841,7 @@ async def compare_stocks(
 
         for ticker in tickers:
             try:
-                ticker_obj = yf.Ticker(ticker)
+                ticker_obj = make_ticker(ticker)
                 info = ticker_obj.info
 
                 data = {
@@ -879,7 +956,7 @@ async def get_analyst_recommendations(
     """
     ticker = _norm_ticker(ticker)
     try:
-        ticker_obj = yf.Ticker(ticker)
+        ticker_obj = make_ticker(ticker)
         info = ticker_obj.info
 
         # Recommendation trend: modern yfinance returns columns
@@ -984,6 +1061,447 @@ async def get_analyst_recommendations(
         error_msg += "- Verify ticker symbol is correct\n"
         error_msg += "- Analyst data may not be available for all stocks"
         return error_msg
+
+
+@mcp.tool(
+    name="get_market_news",
+    annotations={
+        "title": "Get Latest Financial News",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def get_market_news(
+    ticker: Annotated[
+        str,
+        Field(
+            description="Stock ticker symbol to get news for (e.g., 'AAPL', 'TSLA', 'NVDA')",
+            min_length=1,
+            max_length=10,
+        ),
+    ],
+    count: Annotated[
+        int,
+        Field(description="Number of news articles to return (1-20)", ge=1, le=20),
+    ] = 10,
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Get the latest financial news articles for a stock.
+
+    Use this tool when:
+    - User asks "what's the latest news on [stock]"
+    - User wants recent headlines or developments for a company
+    - User needs context behind a price move
+
+    Args:
+        ticker: Stock ticker symbol.
+        count: How many articles to return (1-20).
+        response_format: 'markdown' or 'json'.
+
+    Returns:
+        str: Recent news headlines with source, date, summary, and link.
+
+    Example:
+        Input: {"ticker": "NVDA", "count": 5}
+        Output: The 5 most recent NVDA news articles
+    """
+    ticker = _norm_ticker(ticker)
+    try:
+        articles = make_ticker(ticker).get_news(count=count) or []
+
+        # Modern yfinance nests each article's fields under a "content" key.
+        def field(article: Dict[str, Any]) -> Dict[str, Any]:
+            return article.get("content", article) or {}
+
+        def link(c: Dict[str, Any]) -> str:
+            for key in ("canonicalUrl", "clickThroughUrl"):
+                val = c.get(key)
+                if isinstance(val, dict) and val.get("url"):
+                    return val["url"]
+            return "N/A"
+
+        def provider(c: Dict[str, Any]) -> str:
+            p = c.get("provider")
+            if isinstance(p, dict):
+                return p.get("displayName", "N/A")
+            return "N/A"
+
+        if not articles:
+            return f"No recent news found for {ticker}."
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# Latest News: {ticker}\n\n"
+            for i, article in enumerate(articles[:count], 1):
+                c = field(article)
+                title = c.get("title", "Untitled")
+                date = c.get("pubDate", c.get("displayTime", ""))
+                summary = c.get("summary") or c.get("description") or ""
+                if len(summary) > 400:
+                    summary = summary[:400].rstrip() + "..."
+                result += f"## {i}. {title}\n"
+                meta = " | ".join(x for x in [provider(c), date] if x and x != "N/A")
+                if meta:
+                    result += f"*{meta}*\n\n"
+                if summary:
+                    result += f"{summary}\n\n"
+                result += f"[Read more]({link(c)})\n\n"
+            return truncate_response(
+                result, "Request fewer articles for a shorter response."
+            )
+        else:
+            items = []
+            for article in articles[:count]:
+                c = field(article)
+                items.append(
+                    {
+                        "title": c.get("title"),
+                        "provider": provider(c),
+                        "pubDate": c.get("pubDate", c.get("displayTime")),
+                        "summary": c.get("summary") or c.get("description"),
+                        "url": link(c),
+                    }
+                )
+            payload = {"ticker": ticker, "count": len(items), "news": items}
+            return truncate_json_response(
+                json.dumps(payload, indent=2, default=str), ""
+            )
+
+    except Exception as e:
+        return _error("market news", ticker, e)
+
+
+@mcp.tool(
+    name="get_options_chain",
+    annotations={
+        "title": "Get Options Chain",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def get_options_chain(
+    ticker: Annotated[
+        str,
+        Field(
+            description="Stock ticker symbol (e.g., 'AAPL', 'SPY', 'TSLA')",
+            min_length=1,
+            max_length=10,
+        ),
+    ],
+    expiration_date: Annotated[
+        str,
+        Field(
+            description="Options expiration date as 'YYYY-MM-DD'. Leave empty to list all available expiration dates instead.",
+        ),
+    ] = "",
+    option_type: Annotated[
+        OptionType,
+        Field(
+            description="Which side of the chain to return: 'calls', 'puts', or 'both'"
+        ),
+    ] = OptionType.BOTH,
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Get the options chain (calls/puts) for a stock, or list expiration dates.
+
+    Call without an expiration_date first to see the available dates, then call
+    again with a specific date to get the chain.
+
+    Use this tool when:
+    - User asks about options, calls, puts, strikes, or implied volatility
+    - User wants the options chain for a specific expiration
+
+    Args:
+        ticker: Stock ticker symbol.
+        expiration_date: 'YYYY-MM-DD', or empty to list available dates.
+        option_type: 'calls', 'puts', or 'both'.
+        response_format: 'markdown' or 'json'.
+
+    Returns:
+        str: Either the list of expiration dates, or the requested options chain.
+
+    Example:
+        Input: {"ticker": "SPY"} -> lists expirations
+        Input: {"ticker": "SPY", "expiration_date": "2026-06-20", "option_type": "calls"}
+    """
+    ticker = _norm_ticker(ticker)
+    try:
+        t = make_ticker(ticker)
+        expirations = list(t.options or [])
+
+        if not expirations:
+            return f"No options data available for {ticker}. It may not have listed options."
+
+        # No date requested -> return the menu of available expirations.
+        if not expiration_date.strip():
+            if response_format == ResponseFormat.MARKDOWN:
+                result = f"# Options Expirations: {ticker}\n\n"
+                result += f"**{len(expirations)} available expiration dates:**\n\n"
+                result += ", ".join(expirations)
+                result += "\n\n*Call again with an `expiration_date` to get the chain.*"
+                return result
+            return json.dumps(
+                {"ticker": ticker, "expirationDates": expirations}, indent=2
+            )
+
+        if expiration_date not in expirations:
+            return (
+                f"'{expiration_date}' is not an available expiration for {ticker}.\n\n"
+                f"Available dates: {', '.join(expirations)}"
+            )
+
+        chain = t.option_chain(expiration_date)
+        want_calls = option_type in (OptionType.CALLS, OptionType.BOTH)
+        want_puts = option_type in (OptionType.PUTS, OptionType.BOTH)
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# Options Chain: {ticker} ({expiration_date})\n\n"
+            if want_calls:
+                result += "## Calls\n\n"
+                result += dataframe_to_markdown(chain.calls, max_rows=40)
+                result += "\n\n"
+            if want_puts:
+                result += "## Puts\n\n"
+                result += dataframe_to_markdown(chain.puts, max_rows=40)
+                result += "\n\n"
+            return truncate_response(
+                result, "Request a single option_type or use JSON for the full chain."
+            )
+        else:
+            payload: Dict[str, Any] = {
+                "ticker": ticker,
+                "expirationDate": expiration_date,
+            }
+            if want_calls:
+                payload["calls"] = chain.calls.to_dict(orient="records")
+            if want_puts:
+                payload["puts"] = chain.puts.to_dict(orient="records")
+            return truncate_json_response(
+                json.dumps(payload, indent=2, default=str), ""
+            )
+
+    except Exception as e:
+        return _error("options chain", ticker, e)
+
+
+@mcp.tool(
+    name="get_holders",
+    annotations={
+        "title": "Get Stock Ownership and Insider Activity",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def get_holders(
+    ticker: Annotated[
+        str,
+        Field(
+            description="Stock ticker symbol (e.g., 'AAPL', 'MSFT', 'TSLA')",
+            min_length=1,
+            max_length=10,
+        ),
+    ],
+    holder_type: Annotated[
+        HolderType,
+        Field(
+            description="Type of ownership data: 'institutional', 'mutualfund', 'major', or 'insider_transactions'"
+        ),
+    ] = HolderType.INSTITUTIONAL,
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Get ownership breakdown and insider activity for a stock.
+
+    Use this tool when:
+    - User asks who owns a stock, or about institutional/fund ownership
+    - User wants recent insider buying/selling
+    - User wants the major-holders summary (insider vs institutional %)
+
+    Args:
+        ticker: Stock ticker symbol.
+        holder_type: 'institutional', 'mutualfund', 'major', or 'insider_transactions'.
+        response_format: 'markdown' or 'json'.
+
+    Returns:
+        str: The requested ownership table.
+
+    Example:
+        Input: {"ticker": "AAPL", "holder_type": "institutional"}
+        Output: Top institutional holders with shares and % held
+    """
+    ticker = _norm_ticker(ticker)
+    try:
+        t = make_ticker(ticker)
+        labels = {
+            HolderType.INSTITUTIONAL: (
+                "Institutional Holders",
+                lambda: t.institutional_holders,
+            ),
+            HolderType.MUTUALFUND: (
+                "Mutual Fund Holders",
+                lambda: t.mutualfund_holders,
+            ),
+            HolderType.MAJOR: ("Major Holders Breakdown", lambda: t.major_holders),
+            HolderType.INSIDER_TRANSACTIONS: (
+                "Insider Transactions",
+                lambda: t.insider_transactions,
+            ),
+        }
+        title, getter = labels[holder_type]
+        df = getter()
+
+        if df is None or (hasattr(df, "empty") and df.empty):
+            return f"No {title.lower()} data available for {ticker}."
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# {title}: {ticker}\n\n"
+            result += dataframe_to_markdown(df, max_rows=40)
+            return truncate_response(
+                result, "Use JSON format for the complete dataset."
+            )
+        else:
+            payload = {
+                "ticker": ticker,
+                "holderType": holder_type.value,
+                "data": df.reset_index().to_dict(orient="records"),
+            }
+            return truncate_json_response(
+                json.dumps(payload, indent=2, default=str), ""
+            )
+
+    except Exception as e:
+        return _error("holders", ticker, e)
+
+
+@mcp.tool(
+    name="get_dividends_splits",
+    annotations={
+        "title": "Get Dividend and Stock Split History",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def get_dividends_splits(
+    ticker: Annotated[
+        str,
+        Field(
+            description="Stock ticker symbol (e.g., 'AAPL', 'KO', 'JNJ')",
+            min_length=1,
+            max_length=10,
+        ),
+    ],
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Get the dividend payment and stock split history for a stock.
+
+    Use this tool when:
+    - User asks about a company's dividend history or track record
+    - User asks when a stock split, or its split history
+    - User wants to see dividend growth over time
+
+    Args:
+        ticker: Stock ticker symbol.
+        response_format: 'markdown' or 'json'.
+
+    Returns:
+        str: Dividend history and split history with a short summary.
+
+    Example:
+        Input: {"ticker": "KO"}
+        Output: Coca-Cola's dividend payments and any stock splits
+    """
+    ticker = _norm_ticker(ticker)
+    try:
+        t = make_ticker(ticker)
+        dividends = t.dividends
+        splits = t.splits
+
+        has_div = dividends is not None and len(dividends) > 0
+        has_splits = splits is not None and len(splits) > 0
+
+        if not has_div and not has_splits:
+            return f"No dividend or split history available for {ticker} (it may not pay dividends)."
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# Dividends & Splits: {ticker}\n\n"
+
+            if has_div:
+                latest = dividends.tail(12)
+                result += "## Dividend History\n\n"
+                result += f"- **Total payments on record:** {len(dividends)}\n"
+                result += (
+                    f"- **First payment:** {dividends.index[0].strftime('%Y-%m-%d')}\n"
+                )
+                result += f"- **Most recent:** {format_currency(float(dividends.iloc[-1]))} on {dividends.index[-1].strftime('%Y-%m-%d')}\n"
+                ttm = float(dividends.tail(4).sum())
+                result += f"- **Trailing ~12mo (last 4 payments):** {format_currency(ttm)}\n\n"
+                result += "### Recent payments (last 12)\n\n"
+                div_df = latest.rename("Dividend").to_frame()
+                div_df.index = div_df.index.strftime("%Y-%m-%d")
+                result += dataframe_to_markdown(div_df, max_rows=12)
+                result += "\n\n"
+            else:
+                result += "## Dividend History\n\nNo dividends on record.\n\n"
+
+            if has_splits:
+                result += "## Stock Split History\n\n"
+                split_df = splits.rename("Split Ratio").to_frame()
+                split_df.index = split_df.index.strftime("%Y-%m-%d")
+                result += dataframe_to_markdown(split_df, max_rows=40)
+            else:
+                result += "## Stock Split History\n\nNo splits on record.\n"
+
+            return truncate_response(
+                result, "Use JSON format for the complete history."
+            )
+        else:
+            payload = {
+                "ticker": ticker,
+                "dividends": [
+                    {"date": d.strftime("%Y-%m-%d"), "amount": float(v)}
+                    for d, v in dividends.items()
+                ]
+                if has_div
+                else [],
+                "splits": [
+                    {"date": d.strftime("%Y-%m-%d"), "ratio": float(v)}
+                    for d, v in splits.items()
+                ]
+                if has_splits
+                else [],
+            }
+            return truncate_json_response(
+                json.dumps(payload, indent=2, default=str), ""
+            )
+
+    except Exception as e:
+        return _error("dividends and splits", ticker, e)
 
 
 # ============================================================================

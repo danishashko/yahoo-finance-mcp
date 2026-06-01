@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-01
+
+Major feature release: four new data tools (10 total) plus rate-limit
+hardening. Every tool was verified end to end by driving the real MCP server
+over stdio against live Yahoo Finance data.
+
+### Added
+
+- **`get_market_news`** — latest news headlines for a ticker, with source,
+  date, summary, and link. Handles the modern nested yfinance news format.
+- **`get_options_chain`** — list available expiration dates, or fetch the
+  calls/puts chain (strike, bid/ask, volume, open interest, implied
+  volatility) for a given expiration.
+- **`get_holders`** — institutional holders, mutual-fund holders, the
+  major-holders breakdown, or recent insider transactions.
+- **`get_dividends_splits`** — full dividend payment history (with a trailing
+  summary) and stock-split history.
+- **Shared `curl_cffi` browser-impersonating HTTP session** reused across all
+  tools. This cuts down on Yahoo's HTTP 429 rate-limiting and speeds up
+  repeated calls; it degrades gracefully to the default session if
+  `curl_cffi` is unavailable.
+- Friendly, specific handling of `YFRateLimitError` ("wait and retry")
+  across all tools.
+
+### Changed
+
+- `requirements.txt`: add `curl_cffi`; raise the `yfinance` floor to
+  `>=0.2.61` (which carries upstream rate-limit-handling fixes).
+
 ## [1.1.1] - 2026-05-31
 
 Documentation and packaging only. No runtime code changes; behavior is
@@ -75,6 +104,7 @@ end by driving the real MCP server over stdio against live Yahoo Finance data.
   `get_analyst_recommendations`.
 - Markdown and JSON output formats.
 
+[1.2.0]: https://github.com/danishashko/yahoo-finance-mcp/releases/tag/v1.2.0
 [1.1.1]: https://github.com/danishashko/yahoo-finance-mcp/releases/tag/v1.1.1
 [1.1.0]: https://github.com/danishashko/yahoo-finance-mcp/releases/tag/v1.1.0
 [1.0.0]: https://github.com/danishashko/yahoo-finance-mcp/releases/tag/v1.0.0

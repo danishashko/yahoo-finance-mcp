@@ -17,8 +17,12 @@ Real-time stock market data for Claude Desktop and any MCP-compatible client, po
 - 💰 **Financial statements** (income, balance sheet, cash flow)
 - 🎯 **Analyst ratings**, price targets, and the recent recommendation trend
 - ⚖️ **Multi-stock comparisons** side by side
+- 📰 **Latest financial news** per ticker
+- 🧾 **Options chains** (calls/puts, strikes, IV, open interest)
+- 🏦 **Ownership data** — institutional, mutual fund, and insider activity
+- 💵 **Dividend & split history**
 
-Every tool returns human-readable **markdown** by default, or structured **JSON** on request (`response_format: "json"`).
+Every tool returns human-readable **markdown** by default, or structured **JSON** on request (`response_format: "json"`). Requests share a single browser-impersonating HTTP session to reduce Yahoo Finance rate-limiting.
 
 ## 🚀 Quick Start
 
@@ -66,6 +70,10 @@ npm install -g yahoo-finance-mcp-server
 | `get_financial_statements` | Annual income statement, balance sheet, and cash flow | `ticker` |
 | `compare_stocks` | Key metrics for multiple tickers side by side, plus quick insights | `tickers` (2 to 10) |
 | `get_analyst_recommendations` | Price targets, consensus, recommendation trend, and recent upgrades/downgrades | `ticker` |
+| `get_market_news` | Latest news headlines with source, date, summary, and link | `ticker`, `count` |
+| `get_options_chain` | Expiration dates, or the calls/puts chain (strike, bid/ask, volume, OI, IV) | `ticker`, `expiration_date`, `option_type` |
+| `get_holders` | Institutional, mutual-fund, or major holders, or insider transactions | `ticker`, `holder_type` |
+| `get_dividends_splits` | Dividend payment history (with summary) and stock-split history | `ticker` |
 
 Every tool also accepts `response_format` (`"markdown"`, the default, or `"json"`).
 
@@ -73,6 +81,10 @@ Every tool also accepts `response_format` (`"markdown"`, the default, or `"json"
 
 - `period`: `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `10y`, `ytd`, `max`
 - `interval`: `1m`, `2m`, `5m`, `15m`, `30m`, `60m`, `90m`, `1h`, `1d`, `5d`, `1wk`, `1mo`, `3mo`
+
+**`get_options_chain`:** call without `expiration_date` to list available dates, then again with a date. `option_type` is `calls`, `puts`, or `both`.
+
+**`get_holders`:** `holder_type` is `institutional`, `mutualfund`, `major`, or `insider_transactions`.
 
 ## 💬 Example Prompts
 
@@ -84,6 +96,10 @@ Once the server is connected, just ask Claude:
 - "Show me Apple's income statement"
 - "Compare AAPL, MSFT, and GOOGL"
 - "What do analysts think about Amazon, and what's the price target?"
+- "What's the latest news on NVIDIA?"
+- "Show me the SPY call options expiring next month"
+- "Who are the biggest institutional holders of Apple?"
+- "What's Coca-Cola's dividend history?"
 
 ## 🛠️ Manual Installation (Alternative)
 
@@ -94,7 +110,7 @@ If you would rather run the Python file directly instead of via npx:
 Save `yahoo_finance_mcp.py` somewhere on your machine and install the dependencies:
 
 ```bash
-pip install yfinance pandas tabulate mcp pydantic httpx
+pip install yfinance curl_cffi pandas tabulate mcp pydantic httpx
 ```
 
 (or `pip3` on macOS/Linux)
@@ -125,7 +141,7 @@ Make sure Python and Node.js are installed and on your PATH. On macOS/Linux, try
 Install the dependencies:
 
 ```bash
-pip install yfinance pandas tabulate mcp pydantic httpx
+pip install yfinance curl_cffi pandas tabulate mcp pydantic httpx
 ```
 
 **Tools not showing up in Claude**
