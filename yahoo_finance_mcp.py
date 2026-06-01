@@ -1504,6 +1504,331 @@ async def get_dividends_splits(
         return _error("dividends and splits", ticker, e)
 
 
+@mcp.tool(
+    name="get_analyst_estimates",
+    annotations={
+        "title": "Get Forward Analyst Estimates",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def get_analyst_estimates(
+    ticker: Annotated[
+        str,
+        Field(
+            description="Stock ticker symbol (e.g., 'AAPL', 'MSFT', 'TSLA')",
+            min_length=1,
+            max_length=10,
+        ),
+    ],
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Get forward-looking analyst estimates: price targets, EPS/revenue estimates, and growth.
+
+    This complements get_analyst_recommendations (which covers ratings/trend) with
+    the forward numbers analysts project.
+
+    Use this tool when:
+    - User asks about the analyst price target or expected upside
+    - User wants projected EPS or revenue for upcoming quarters/years
+    - User asks how estimates have trended or expected growth rates
+
+    Args:
+        ticker: Stock ticker symbol.
+        response_format: 'markdown' or 'json'.
+
+    Returns:
+        str: Price targets, EPS estimate, revenue estimate, and growth estimates.
+        Estimate periods are labelled 0q (current quarter), +1q (next quarter),
+        0y (current year), +1y (next year).
+
+    Example:
+        Input: {"ticker": "AAPL"}
+        Output: Mean/high/low price target, forward EPS & revenue, growth outlook
+    """
+    ticker = _norm_ticker(ticker)
+    try:
+        t = make_ticker(ticker)
+        targets = t.analyst_price_targets or {}
+        eps_est = t.earnings_estimate
+        rev_est = t.revenue_estimate
+        growth = t.growth_estimates
+
+        def has(df) -> bool:
+            return df is not None and hasattr(df, "empty") and not df.empty
+
+        if not targets and not has(eps_est) and not has(rev_est):
+            return f"No analyst estimate data available for {ticker}."
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# Analyst Estimates: {ticker}\n\n"
+
+            if targets:
+                result += "## Price Target\n\n"
+                result += f"- **Current:** {format_currency(targets.get('current'))}\n"
+                result += f"- **Mean:** {format_currency(targets.get('mean'))}\n"
+                result += f"- **Median:** {format_currency(targets.get('median'))}\n"
+                result += f"- **High:** {format_currency(targets.get('high'))}\n"
+                result += f"- **Low:** {format_currency(targets.get('low'))}\n"
+                cur, mean = targets.get("current"), targets.get("mean")
+                if (
+                    isinstance(cur, (int, float))
+                    and isinstance(mean, (int, float))
+                    and cur
+                ):
+                    result += f"- **Upside to mean target:** {((mean - cur) / cur) * 100:+.2f}%\n"
+                result += "\n"
+
+            if has(eps_est):
+                result += "## EPS Estimate\n\n"
+                result += "*Periods: 0q = current quarter, +1q = next, 0y = current year, +1y = next.*\n\n"
+                result += dataframe_to_markdown(eps_est)
+                result += "\n\n"
+
+            if has(rev_est):
+                result += "## Revenue Estimate\n\n"
+                result += dataframe_to_markdown(rev_est)
+                result += "\n\n"
+
+            if has(growth):
+                result += "## Growth Estimates\n\n"
+                result += dataframe_to_markdown(growth)
+                result += "\n"
+
+            return truncate_response(
+                result, "Use JSON format for the complete dataset."
+            )
+        else:
+
+            def df_records(df):
+                return df.reset_index().to_dict(orient="records") if has(df) else []
+
+            payload = {
+                "ticker": ticker,
+                "priceTargets": targets,
+                "earningsEstimate": df_records(eps_est),
+                "revenueEstimate": df_records(rev_est),
+                "growthEstimates": df_records(growth),
+            }
+            return truncate_json_response(
+                json.dumps(payload, indent=2, default=str), ""
+            )
+
+    except Exception as e:
+        return _error("analyst estimates", ticker, e)
+
+
+@mcp.tool(
+    name="search_symbols",
+    annotations={
+        "title": "Search for Ticker Symbols",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def search_symbols(
+    query: Annotated[
+        str,
+        Field(
+            description="Company name or keyword to search for (e.g., 'Apple', 'electric vehicles', 'Berkshire')",
+            min_length=1,
+            max_length=100,
+        ),
+    ],
+    count: Annotated[
+        int,
+        Field(description="Maximum number of matches to return (1-20)", ge=1, le=20),
+    ] = 8,
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Find ticker symbols by company name or keyword.
+
+    Use this tool when:
+    - The user names a company but not its ticker ("what's the symbol for ...")
+    - You need to resolve a name to a ticker before calling other tools
+    - The user wants to discover related/similar listed companies
+
+    Args:
+        query: Company name or keyword.
+        count: Max matches to return (1-20).
+        response_format: 'markdown' or 'json'.
+
+    Returns:
+        str: Matching symbols with name, exchange, type, sector, and industry.
+
+    Example:
+        Input: {"query": "Apple"}
+        Output: AAPL - Apple Inc. (NASDAQ, Equity, Technology) and related matches
+    """
+    query = query.strip()
+    try:
+        session = _get_session()
+        kwargs = {"max_results": count, "news_count": 0}
+        if session is not None:
+            kwargs["session"] = session
+        try:
+            search = yf.Search(query, **kwargs)
+        except Exception:
+            search = yf.Search(query)  # fall back to defaults if kwargs unsupported
+
+        quotes = (search.quotes or [])[:count]
+        if not quotes:
+            return f"No symbols found matching '{query}'."
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f'# Symbol Search: "{query}"\n\n'
+            for q in quotes:
+                sym = q.get("symbol", "?")
+                name = q.get("longname") or q.get("shortname") or ""
+                exch = q.get("exchDisp", "")
+                typ = q.get("typeDisp", q.get("quoteType", ""))
+                extra = ", ".join(x for x in [exch, typ, q.get("sector", "")] if x)
+                result += f"- **{sym}** — {name}"
+                if extra:
+                    result += f" ({extra})"
+                result += "\n"
+            return truncate_response(result, "")
+        else:
+            items = [
+                {
+                    "symbol": q.get("symbol"),
+                    "name": q.get("longname") or q.get("shortname"),
+                    "exchange": q.get("exchDisp"),
+                    "type": q.get("typeDisp", q.get("quoteType")),
+                    "sector": q.get("sector"),
+                    "industry": q.get("industry"),
+                }
+                for q in quotes
+            ]
+            payload = {"query": query, "count": len(items), "results": items}
+            return truncate_json_response(
+                json.dumps(payload, indent=2, default=str), ""
+            )
+
+    except Exception as e:
+        return _error("symbol search", query, e)
+
+
+@mcp.tool(
+    name="get_market_status",
+    annotations={
+        "title": "Get Market Status and Summary",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def get_market_status(
+    region: Annotated[
+        str,
+        Field(
+            description="Market region code (e.g., 'US', 'GB', 'CA', 'DE', 'FR', 'IN', 'JP', 'HK', 'AU')",
+            min_length=2,
+            max_length=3,
+        ),
+    ] = "US",
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Check whether a market is open and get a summary of its major indices.
+
+    Use this tool when:
+    - User asks "is the market open?" or when it opens/closes
+    - User wants a quick read on the major indices for a region
+
+    Args:
+        region: Market region code (default 'US').
+        response_format: 'markdown' or 'json'.
+
+    Returns:
+        str: Market open/closed status with timing, plus major index levels.
+
+    Example:
+        Input: {"region": "US"}
+        Output: U.S. markets status, close time, and S&P/Dow/Nasdaq summary
+    """
+    region = region.strip().upper()
+    try:
+        session = _get_session()
+        try:
+            mkt = (
+                yf.Market(region, session=session)
+                if session is not None
+                else yf.Market(region)
+            )
+        except Exception:
+            mkt = yf.Market(region)
+
+        status = mkt.status or {}
+        summary = mkt.summary or {}
+
+        if not status and not summary:
+            return f"No market data available for region '{region}'. Try a code like 'US', 'GB', or 'JP'."
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# Market Status: {status.get('name', region)}\n\n"
+            state = status.get("status", "unknown")
+            result += f"- **Status:** {str(state).upper()}\n"
+            if status.get("message"):
+                result += f"- {status['message']}\n"
+            if status.get("open"):
+                result += f"- **Open:** {status['open']}\n"
+            if status.get("close"):
+                result += f"- **Close:** {status['close']}\n"
+            tz = status.get("tz")
+            if tz:
+                result += f"- **Timezone:** {tz}\n"
+
+            if summary:
+                result += "\n## Major Indices\n\n"
+                for _key, idx in summary.items():
+                    if not isinstance(idx, dict):
+                        continue
+                    name = idx.get("shortName", idx.get("symbol", "?"))
+                    price = idx.get("regularMarketPrice")
+                    chg = idx.get("regularMarketChangePercent")
+                    price_val = price.get("raw") if isinstance(price, dict) else price
+                    chg_val = chg.get("raw") if isinstance(chg, dict) else chg
+                    line = f"- **{name}:** "
+                    line += (
+                        format_currency(price_val)
+                        if isinstance(price_val, (int, float))
+                        else "N/A"
+                    )
+                    if isinstance(chg_val, (int, float)):
+                        line += f" ({chg_val:+.2f}%)"
+                    result += line + "\n"
+
+            return truncate_response(result, "")
+        else:
+            payload = {"region": region, "status": status, "summary": summary}
+            return truncate_json_response(
+                json.dumps(payload, indent=2, default=str), ""
+            )
+
+    except Exception as e:
+        return _error("market status", region, e)
+
+
 # ============================================================================
 # RUN SERVER
 # ============================================================================

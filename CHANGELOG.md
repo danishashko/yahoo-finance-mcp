@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.2.0] - 2026-06-01
 
-Major feature release: four new data tools (10 total) plus rate-limit
+Major feature release: **seven new data tools (6 → 13)** plus rate-limit
 hardening. Every tool was verified end to end by driving the real MCP server
 over stdio against live Yahoo Finance data.
 
@@ -22,6 +22,13 @@ over stdio against live Yahoo Finance data.
   major-holders breakdown, or recent insider transactions.
 - **`get_dividends_splits`** — full dividend payment history (with a trailing
   summary) and stock-split history.
+- **`get_analyst_estimates`** — forward analyst price targets, EPS and revenue
+  estimates by period, and growth estimates (complements the existing
+  recommendations tool).
+- **`search_symbols`** — find ticker symbols by company name or keyword, with
+  exchange, type, sector, and industry.
+- **`get_market_status`** — whether a market (by region) is open or closed,
+  with timing and a summary of its major indices.
 - **Shared `curl_cffi` browser-impersonating HTTP session** reused across all
   tools. This cuts down on Yahoo's HTTP 429 rate-limiting and speeds up
   repeated calls; it degrades gracefully to the default session if
@@ -32,7 +39,8 @@ over stdio against live Yahoo Finance data.
 ### Changed
 
 - `requirements.txt`: add `curl_cffi`; raise the `yfinance` floor to
-  `>=0.2.61` (which carries upstream rate-limit-handling fixes).
+  `>=0.2.61` (which carries upstream rate-limit-handling fixes and the
+  `Search`/`Market` APIs used by the new tools).
 
 ## [1.1.1] - 2026-05-31
 

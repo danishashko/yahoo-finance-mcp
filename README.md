@@ -21,6 +21,9 @@ Real-time stock market data for Claude Desktop and any MCP-compatible client, po
 - 🧾 **Options chains** (calls/puts, strikes, IV, open interest)
 - 🏦 **Ownership data** — institutional, mutual fund, and insider activity
 - 💵 **Dividend & split history**
+- 🔮 **Forward analyst estimates** (price targets, EPS/revenue, growth)
+- 🔎 **Symbol search** by company name or keyword
+- 🕒 **Market status** (open/closed) and index summary
 
 Every tool returns human-readable **markdown** by default, or structured **JSON** on request (`response_format: "json"`). Requests share a single browser-impersonating HTTP session to reduce Yahoo Finance rate-limiting.
 
@@ -74,6 +77,9 @@ npm install -g yahoo-finance-mcp-server
 | `get_options_chain` | Expiration dates, or the calls/puts chain (strike, bid/ask, volume, OI, IV) | `ticker`, `expiration_date`, `option_type` |
 | `get_holders` | Institutional, mutual-fund, or major holders, or insider transactions | `ticker`, `holder_type` |
 | `get_dividends_splits` | Dividend payment history (with summary) and stock-split history | `ticker` |
+| `get_analyst_estimates` | Forward price targets, EPS/revenue estimates by period, and growth estimates | `ticker` |
+| `search_symbols` | Find ticker symbols by company name or keyword | `query`, `count` |
+| `get_market_status` | Whether a market is open/closed, with timing and a major-index summary | `region` |
 
 Every tool also accepts `response_format` (`"markdown"`, the default, or `"json"`).
 
