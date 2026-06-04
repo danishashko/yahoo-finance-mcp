@@ -247,27 +247,28 @@ def truncate_response(response: str, message: str = "") -> str:
     if len(response) <= CHARACTER_LIMIT:
         return response
 
-    truncated = response[:CHARACTER_LIMIT]
-    truncation_msg = (
-        f"\n\n⚠️ Response truncated at {CHARACTER_LIMIT} characters. {message}"
+    suffix = (
+        f"\n\n⚠️ Response truncated at {CHARACTER_LIMIT} characters. {message}".rstrip()
     )
-    return truncated + truncation_msg
+    # Reserve room for the suffix so the total never exceeds CHARACTER_LIMIT.
+    return response[: max(0, CHARACTER_LIMIT - len(suffix))] + suffix
 
 
 def truncate_json_response(payload: str, message: str = "") -> str:
-    """Truncate a JSON payload while keeping the result valid JSON.
+    """Cap an oversized JSON payload without dumping it into context.
 
-    Rather than slicing a JSON string mid-structure (which yields unparseable
-    output), wrap an oversized payload in a small valid JSON envelope.
+    Returns a small, valid-JSON message asking the caller to narrow the request
+    rather than a giant mid-cut preview (which is both context-bloating and
+    useless to the model). Keeps the total response tiny.
     """
     if len(payload) <= CHARACTER_LIMIT:
         return payload
 
-    note = f"Response exceeded {CHARACTER_LIMIT} characters and was truncated. {message}".strip()
-    return json.dumps(
-        {"warning": note, "truncatedPreview": payload[:CHARACTER_LIMIT]},
-        indent=2,
+    note = (
+        f"Response was too large (~{len(payload)} characters) and was not returned in full. "
+        f"{message}".strip()
     )
+    return json.dumps({"error": "response_too_large", "message": note}, indent=2)
 
 
 # ============================================================================
@@ -301,27 +302,7 @@ async def get_stock_quote(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Get current stock quote with real-time price, volume, and market data.
-
-    This tool retrieves the latest stock quote including current price, day's range,
-    trading volume, market cap, and other key metrics for a given ticker symbol.
-
-    Use this tool when:
-    - User wants current/latest stock price
-    - User asks "what's the price of [stock]"
-    - User wants basic stock information
-
-    Args:
-        ticker: Stock ticker symbol (e.g., 'AAPL', 'MSFT', 'TSLA').
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Current stock quote in requested format (markdown or JSON).
-
-    Example:
-        Input: {"ticker": "AAPL", "response_format": "markdown"}
-        Output: Formatted markdown with current price, volume, market cap, etc.
-    """
+    """Current stock quote: price, change, day/52-week range, volume, market cap, P/E, EPS, dividend yield. Use for "what's the price of [stock]"."""
     ticker = _norm_ticker(ticker)
     try:
         ticker_obj = make_ticker(ticker)
@@ -458,29 +439,7 @@ async def get_historical_prices(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Get historical stock price data with OHLCV (Open, High, Low, Close, Volume).
-
-    This tool retrieves historical price data for technical analysis, charting,
-    and trend analysis.
-
-    Use this tool when:
-    - User wants to see price history/trends
-    - User asks "how has [stock] performed over [time period]"
-    - User wants data for charting or analysis
-
-    Args:
-        ticker: Stock ticker symbol.
-        period: Time period ('1mo', '1y', '5y', etc.).
-        interval: Data interval ('1d', '1h', etc.).
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Historical price data in requested format.
-
-    Example:
-        Input: {"ticker": "AAPL", "period": "1mo", "interval": "1d"}
-        Output: Daily OHLCV data for the past month
-    """
+    """Historical OHLCV price data with summary stats and total return, for trends/charting. Use for "how has [stock] performed over [period]"."""
     ticker = _norm_ticker(ticker)
     try:
         ticker_obj = make_ticker(ticker)
@@ -574,25 +533,7 @@ async def get_company_info(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Get comprehensive company information including business description, officers, and key statistics.
-
-    Use this tool when:
-    - User wants to know "what does [company] do"
-    - User asks about company leadership/executives
-    - User wants detailed company background
-    - User needs comprehensive financial statistics
-
-    Args:
-        ticker: Stock ticker symbol.
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Detailed company information in requested format.
-
-    Example:
-        Input: {"ticker": "AAPL", "response_format": "markdown"}
-        Output: Full company profile with description, officers, statistics
-    """
+    """Company profile: business summary, executives, valuation and financial-highlight stats. Use for "what does [company] do" or company background."""
     ticker = _norm_ticker(ticker)
     try:
         ticker_obj = make_ticker(ticker)
@@ -714,25 +655,7 @@ async def get_financial_statements(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Get comprehensive financial statements including income statement, balance sheet, and cash flow.
-
-    Use this tool when:
-    - User wants to see revenue, earnings, expenses
-    - User asks about balance sheet items (assets, liabilities)
-    - User wants cash flow information
-    - User needs data for financial analysis
-
-    Args:
-        ticker: Stock ticker symbol.
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Financial statements in requested format.
-
-    Example:
-        Input: {"ticker": "AAPL", "response_format": "markdown"}
-        Output: Income statement, balance sheet, and cash flow data
-    """
+    """Annual income statement, balance sheet, and cash flow. Use for revenue, earnings, assets/liabilities, or fundamental analysis."""
     ticker = _norm_ticker(ticker)
     try:
         ticker_obj = make_ticker(ticker)
@@ -817,24 +740,7 @@ async def compare_stocks(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Compare key metrics across multiple stocks side-by-side.
-
-    Use this tool when:
-    - User wants to compare multiple stocks
-    - User asks "which is better, [stock1] or [stock2]"
-    - User wants to see relative performance
-
-    Args:
-        tickers: 2-10 ticker symbols to compare.
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Comparison table in requested format.
-
-    Example:
-        Input: {"tickers": ["AAPL", "MSFT", "GOOGL"], "response_format": "markdown"}
-        Output: Side-by-side comparison table of key metrics
-    """
+    """Compare key metrics for 2-10 stocks side by side, with quick insights. Use for "which is better, X or Y" or relative performance."""
     tickers = [_norm_ticker(t) for t in tickers]
     try:
         comparison_data = []
@@ -935,25 +841,7 @@ async def get_analyst_recommendations(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Get analyst recommendations, price targets, and the recent rating trend.
-
-    Use this tool when:
-    - User wants to know what analysts think
-    - User asks about price targets or recommendations
-    - User wants to see recent upgrades/downgrades
-    - User needs a professional analysis summary
-
-    Args:
-        ticker: Stock ticker symbol.
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Analyst recommendations and price targets.
-
-    Example:
-        Input: {"ticker": "AAPL", "response_format": "markdown"}
-        Output: Analyst consensus, price targets, recommendation trend
-    """
+    """Analyst price targets, consensus rating, recommendation trend, and recent upgrades/downgrades. Use for "what do analysts think of [stock]". For forward EPS/revenue estimates use get_analyst_estimates."""
     ticker = _norm_ticker(ticker)
     try:
         ticker_obj = make_ticker(ticker)
@@ -1093,25 +981,7 @@ async def get_market_news(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Get the latest financial news articles for a stock.
-
-    Use this tool when:
-    - User asks "what's the latest news on [stock]"
-    - User wants recent headlines or developments for a company
-    - User needs context behind a price move
-
-    Args:
-        ticker: Stock ticker symbol.
-        count: How many articles to return (1-20).
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Recent news headlines with source, date, summary, and link.
-
-    Example:
-        Input: {"ticker": "NVDA", "count": 5}
-        Output: The 5 most recent NVDA news articles
-    """
+    """Latest news headlines for a stock (source, date, summary, link). Use for "what's the latest news on [stock]"."""
     ticker = _norm_ticker(ticker)
     try:
         articles = make_ticker(ticker).get_news(count=count) or []
@@ -1215,28 +1085,7 @@ async def get_options_chain(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Get the options chain (calls/puts) for a stock, or list expiration dates.
-
-    Call without an expiration_date first to see the available dates, then call
-    again with a specific date to get the chain.
-
-    Use this tool when:
-    - User asks about options, calls, puts, strikes, or implied volatility
-    - User wants the options chain for a specific expiration
-
-    Args:
-        ticker: Stock ticker symbol.
-        expiration_date: 'YYYY-MM-DD', or empty to list available dates.
-        option_type: 'calls', 'puts', or 'both'.
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Either the list of expiration dates, or the requested options chain.
-
-    Example:
-        Input: {"ticker": "SPY"} -> lists expirations
-        Input: {"ticker": "SPY", "expiration_date": "2026-06-20", "option_type": "calls"}
-    """
+    """Options chain (strike, bid/ask, volume, open interest, IV) for an expiration. Call with no expiration_date first to list available dates, then again with a date."""
     ticker = _norm_ticker(ticker)
     try:
         t = make_ticker(ticker)
@@ -1329,25 +1178,7 @@ async def get_holders(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Get ownership breakdown and insider activity for a stock.
-
-    Use this tool when:
-    - User asks who owns a stock, or about institutional/fund ownership
-    - User wants recent insider buying/selling
-    - User wants the major-holders summary (insider vs institutional %)
-
-    Args:
-        ticker: Stock ticker symbol.
-        holder_type: 'institutional', 'mutualfund', 'major', or 'insider_transactions'.
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: The requested ownership table.
-
-    Example:
-        Input: {"ticker": "AAPL", "holder_type": "institutional"}
-        Output: Top institutional holders with shares and % held
-    """
+    """Stock ownership and insider activity by holder_type: institutional, mutualfund, major (insider-vs-institutional %), or insider_transactions."""
     ticker = _norm_ticker(ticker)
     try:
         t = make_ticker(ticker)
@@ -1418,24 +1249,7 @@ async def get_dividends_splits(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Get the dividend payment and stock split history for a stock.
-
-    Use this tool when:
-    - User asks about a company's dividend history or track record
-    - User asks when a stock split, or its split history
-    - User wants to see dividend growth over time
-
-    Args:
-        ticker: Stock ticker symbol.
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Dividend history and split history with a short summary.
-
-    Example:
-        Input: {"ticker": "KO"}
-        Output: Coca-Cola's dividend payments and any stock splits
-    """
+    """Dividend payment history (with trailing summary) and stock-split history for a stock."""
     ticker = _norm_ticker(ticker)
     try:
         t = make_ticker(ticker)
@@ -1530,29 +1344,7 @@ async def get_analyst_estimates(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Get forward-looking analyst estimates: price targets, EPS/revenue estimates, and growth.
-
-    This complements get_analyst_recommendations (which covers ratings/trend) with
-    the forward numbers analysts project.
-
-    Use this tool when:
-    - User asks about the analyst price target or expected upside
-    - User wants projected EPS or revenue for upcoming quarters/years
-    - User asks how estimates have trended or expected growth rates
-
-    Args:
-        ticker: Stock ticker symbol.
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Price targets, EPS estimate, revenue estimate, and growth estimates.
-        Estimate periods are labelled 0q (current quarter), +1q (next quarter),
-        0y (current year), +1y (next year).
-
-    Example:
-        Input: {"ticker": "AAPL"}
-        Output: Mean/high/low price target, forward EPS & revenue, growth outlook
-    """
+    """Forward analyst estimates: price targets, EPS/revenue estimates by period, and growth. Complements get_analyst_recommendations (ratings/trend) with projected numbers."""
     ticker = _norm_ticker(ticker)
     try:
         t = make_ticker(ticker)
@@ -1655,25 +1447,7 @@ async def search_symbols(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Find ticker symbols by company name or keyword.
-
-    Use this tool when:
-    - The user names a company but not its ticker ("what's the symbol for ...")
-    - You need to resolve a name to a ticker before calling other tools
-    - The user wants to discover related/similar listed companies
-
-    Args:
-        query: Company name or keyword.
-        count: Max matches to return (1-20).
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Matching symbols with name, exchange, type, sector, and industry.
-
-    Example:
-        Input: {"query": "Apple"}
-        Output: AAPL - Apple Inc. (NASDAQ, Equity, Technology) and related matches
-    """
+    """Find ticker symbols by company name or keyword. Use to resolve a name to a ticker before calling other tools."""
     query = query.strip()
     try:
         session = _get_session()
@@ -1749,23 +1523,7 @@ async def get_market_status(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Check whether a market is open and get a summary of its major indices.
-
-    Use this tool when:
-    - User asks "is the market open?" or when it opens/closes
-    - User wants a quick read on the major indices for a region
-
-    Args:
-        region: Market region code (default 'US').
-        response_format: 'markdown' or 'json'.
-
-    Returns:
-        str: Market open/closed status with timing, plus major index levels.
-
-    Example:
-        Input: {"region": "US"}
-        Output: U.S. markets status, close time, and S&P/Dow/Nasdaq summary
-    """
+    """Whether a market (by region code, e.g. US/GB/JP) is open or closed, with timing and a major-index summary."""
     region = region.strip().upper()
     try:
         session = _get_session()
