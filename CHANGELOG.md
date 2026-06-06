@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-06-06
+
+### Changed
+
+- Enriched every tool description with purpose, when-to-use/disambiguation
+  guidance, and return/error behavior. This raises self-describing quality for
+  AI agents (and Glama's Tool Definition Quality score) while staying lean
+  (~140 tokens per tool); parameters remain self-documented via their field
+  descriptions.
+
+### Added
+
+- `Dockerfile`, `.dockerignore`, and `glama.json` to support a containerized
+  Glama release (builds `python:3.12-slim`, runs the server over stdio as a
+  non-root user). Verified locally: the image builds and `tools/list` returns
+  all 13 tools.
+
 ## [1.2.2] - 2026-06-04
 
 ### Fixed
