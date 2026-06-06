@@ -1,0 +1,12 @@
+.git
+.gitignore
+.ruff_cache
+__pycache__
+*.pyc
+node_modules
+bin
+install.sh
+install.bat
+test_installation.py
+claude_desktop_config_example.json
+*.md
