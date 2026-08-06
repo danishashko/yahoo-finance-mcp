@@ -107,6 +107,37 @@ Once the server is connected, just ask Claude:
 - "Who are the biggest institutional holders of Apple?"
 - "What's Coca-Cola's dividend history?"
 
+## 🐛 Troubleshooting
+
+**"Command not found" / "Python not found"**
+Make sure Python and Node.js are installed and on your PATH. On macOS/Linux, try `python3` instead of `python` in the config.
+
+**"Module not found: yfinance" (manual install only)**
+Install the dependencies:
+
+```bash
+pip install yfinance curl_cffi pandas tabulate mcp pydantic httpx
+```
+
+**Tools not showing up in Claude**
+1. Confirm the config file is valid JSON (no trailing commas).
+2. Fully quit and reopen Claude Desktop.
+3. Check the path in your config actually exists.
+
+**"Error fetching data"**
+- Check your internet connection.
+- Verify the ticker symbol (for example `AAPL`, not `Apple`).
+- Some smaller companies have limited data, and Yahoo Finance can be briefly unavailable.
+
+**Using a different model or provider (LiteLLM, OpenRouter, NVIDIA NIM, a local model)**
+This server never talks to a model. Your client starts it as a local process and
+speaks JSON-RPC over stdin/stdout, so changing `ANTHROPIC_BASE_URL` or swapping the
+model behind your client has no effect on it. If tools stop firing after a switch
+like that, check two things: the model has to support function calling, and a proxy
+configured to drop unsupported parameters can silently strip your tool definitions,
+which produces no error at all. Run `/mcp` in your client (or `claude mcp list`) to
+confirm the server is connected before suspecting the server.
+
 ## 🛠️ Manual Installation (Alternative)
 
 If you would rather run the Python file directly instead of via npx:
@@ -137,28 +168,6 @@ pip install yfinance curl_cffi pandas tabulate mcp pydantic httpx
 On Windows use `"command": "python"` and a path like `"C:\\path\\to\\yahoo_finance_mcp.py"` (double backslashes or forward slashes).
 
 **3. Restart Claude Desktop.**
-
-## 🐛 Troubleshooting
-
-**"Command not found" / "Python not found"**
-Make sure Python and Node.js are installed and on your PATH. On macOS/Linux, try `python3` instead of `python` in the config.
-
-**"Module not found: yfinance" (manual install only)**
-Install the dependencies:
-
-```bash
-pip install yfinance curl_cffi pandas tabulate mcp pydantic httpx
-```
-
-**Tools not showing up in Claude**
-1. Confirm the config file is valid JSON (no trailing commas).
-2. Fully quit and reopen Claude Desktop.
-3. Check the path in your config actually exists.
-
-**"Error fetching data"**
-- Check your internet connection.
-- Verify the ticker symbol (for example `AAPL`, not `Apple`).
-- Some smaller companies have limited data, and Yahoo Finance can be briefly unavailable.
 
 ## 🔒 Privacy & Rate Limits
 
