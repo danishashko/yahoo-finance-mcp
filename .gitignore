@@ -21,3 +21,7 @@ HANDOFF.md
 _qa_*.py
 _qa_*.txt
 _*.txt
+
+# Secrets
+.env
+.npmrc
