@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-09-04
+
+### Added
+
+- `--http` serves the same 13 tools over Streamable HTTP at `/mcp`, alongside
+  `--host`, `--port`, `--allowed-host` and `--stateful`. stdio is still the
+  default and is unchanged. This exists because a client that only accepts a
+  URL - n8n's MCP Client Tool node offers HTTP Streamable and SSE and no way to
+  spawn a command - could not reach a stdio-only server at all.
+- DNS-rebinding protection now follows the host actually bound. FastMCP decides
+  its allow-list inside the constructor from the host it was given, so binding
+  wider at run time previously left the built-in localhost list rejecting the
+  very clients the wider bind was for, with a bare `421 Misdirected Request`.
+  `localhost`, `127.0.0.1` and `host.docker.internal` on the bound port are
+  accepted by default; anything else needs `--allowed-host`.
+
+### Fixed
+
+- **`get_financial_statements` returned an error in JSON mode for every
+  ticker.** The statement frames are keyed by pandas Timestamp columns, and
+  `json.dumps` coerces values through `default=` but never keys, so the tool
+  answered `keys must be str, int, float, bool or None, not Timestamp`. Markdown
+  was unaffected, which is why it went unnoticed.
+- **`get_analyst_recommendations` returned nothing in JSON mode for every
+  widely covered stock.** The markdown branch caps the upgrades/downgrades frame
+  at ten rows; the JSON branch serialised the entire rating history, reaching
+  ~263,000 characters on NVDA. Over the response limit, JSON is refused outright
+  rather than truncated, so the price targets and consensus were lost too.
+  Measured before the fix on NVDA, AAPL, MSFT, PLTR and F: all five refused.
+- **`get_historical_prices` refused a year of daily bars in JSON mode** for the
+  same reason. It now returns as many of the newest records as fit, with
+  `totalRecords`, `returnedRecords` and `truncated` so the caller can see what
+  was left out.
+- Three statements at once exceeded the response limit, so JSON now applies the
+  same per-statement 30-row cap the markdown branch already used, and reports
+  the true line-item count in `lineItemCounts`.
+- The markdown truncation note read the row count after the frame had already
+  been replaced by its own head, so it always claimed the cap as the total
+  ("Showing first 30 rows of 30 total").
+
 ## [1.2.5] - 2026-08-06
 
 ### Added

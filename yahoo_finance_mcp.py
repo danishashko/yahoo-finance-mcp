@@ -8,6 +8,7 @@ including stock prices, company information, financial statements, and market an
 Built with FastMCP and yfinance.
 """
 
+import argparse
 import json
 import logging
 from enum import Enum
@@ -18,6 +19,7 @@ import pandas as pd
 from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # Keep yfinance from emitting warnings/progress that could clutter the
 # stderr stream of an MCP stdio server. The JSON-RPC channel is stdout only.
@@ -232,14 +234,66 @@ def dataframe_to_markdown(df: pd.DataFrame, max_rows: int = 50) -> str:
 
     truncated_msg = ""
     if len(df) > max_rows:
+        total = len(df)
         df = df.head(max_rows)
-        truncated_msg = f"\n\n*Showing first {max_rows} rows of {len(df)} total*"
+        truncated_msg = f"\n\n*Showing first {max_rows} rows of {total} total*"
 
     try:
         return df.to_markdown() + truncated_msg
     except ImportError:
         # tabulate not installed - degrade gracefully to a fenced plain table.
         return "```\n" + df.to_string() + "\n```" + truncated_msg
+
+
+def _statement_to_dict(df: Any, max_rows: int = 30) -> Dict[str, Any]:
+    """A financial statement keyed by period, with the periods as strings.
+
+    Every column label on these frames is a pandas Timestamp, and `to_dict()`
+    makes those labels the keys of the returned mapping. `json.dumps` only
+    coerces *values* through `default=`, never keys, so serialising the frame
+    raised "keys must be str, int, float, bool or None, not Timestamp" and the
+    whole tool answered with an error string - in JSON mode only, while the
+    markdown branch rendered the same frame fine.
+    """
+    if df is None or getattr(df, "empty", True):
+        return {}
+    out = df.copy()
+    out.columns = [
+        c.strftime("%Y-%m-%d") if hasattr(c, "strftime") else str(c)
+        for c in out.columns
+    ]
+    # Same 30-row cap the markdown branch applies per statement. All three
+    # uncapped come to ~38,800 characters for NVDA against a 25,000 limit, and
+    # an oversized JSON payload is refused rather than trimmed, so leaving them
+    # whole cost the caller all three statements instead of the tail of each.
+    if len(out) > max_rows:
+        out = out.head(max_rows)
+    return out.to_dict()
+
+
+def _fit_records(records: List[Any], envelope: Dict[str, Any], key: str) -> str:
+    """Serialise as many of the newest records as the response limit allows.
+
+    The JSON branch refuses an oversized payload outright rather than trimming
+    it, so an uncapped frame does not come back shortened - it does not come
+    back at all. A year of daily bars is about 65,000 characters, so asking for
+    a year silently returned nothing. Keep the tail, and say what was dropped.
+    """
+    kept = len(records)
+    while True:
+        body = dict(envelope)
+        body[key] = records[len(records) - kept :] if kept else []
+        body["returnedRecords"] = kept
+        body["truncated"] = kept < len(records)
+        if body["truncated"]:
+            body["note"] = (
+                f"Newest {kept} of {len(records)} records. Narrow the period or "
+                "widen the interval for full coverage."
+            )
+        payload = json.dumps(body, indent=2, default=str)
+        if len(payload) <= CHARACTER_LIMIT or kept == 0:
+            return payload
+        kept = kept * 3 // 4 if kept > 4 else kept - 1
 
 
 def truncate_response(response: str, message: str = "") -> str:
@@ -482,7 +536,7 @@ async def get_historical_prices(
             result += dataframe_to_markdown(recent_data)
 
             if len(hist) > 10:
-                result += f"\n\n*Showing last 10 of {len(hist)} records. Request more data if needed or use JSON format for complete data.*"
+                result += f"\n\n*Showing last 10 of {len(hist)} records. JSON format returns as many of the newest records as fit in one response.*"
 
             return truncate_response(
                 result,
@@ -496,16 +550,15 @@ async def get_historical_prices(
                 elif "Datetime" in record:
                     record["Datetime"] = record["Datetime"].isoformat()
 
-            result = {
-                "ticker": ticker,
-                "period": period.value,
-                "interval": interval.value,
-                "totalRecords": len(hist),
-                "data": hist_dict,
-            }
-            return truncate_json_response(
-                json.dumps(result, indent=2, default=str),
-                "Consider using a shorter period.",
+            return _fit_records(
+                hist_dict,
+                {
+                    "ticker": ticker,
+                    "period": period.value,
+                    "interval": interval.value,
+                    "totalRecords": len(hist),
+                },
+                "data",
             )
 
     except Exception as e:
@@ -708,17 +761,17 @@ async def get_financial_statements(
                 result, "Request specific statement types separately if needed."
             )
         else:
-            result = {
-                "ticker": ticker,
-                "incomeStatement": income_stmt.to_dict()
-                if income_stmt is not None and not income_stmt.empty
-                else {},
-                "balanceSheet": balance_sheet.to_dict()
-                if balance_sheet is not None and not balance_sheet.empty
-                else {},
-                "cashFlow": cash_flow.to_dict()
-                if cash_flow is not None and not cash_flow.empty
-                else {},
+            statements = {
+                "incomeStatement": income_stmt,
+                "balanceSheet": balance_sheet,
+                "cashFlow": cash_flow,
+            }
+            result = {"ticker": ticker}
+            result.update({k: _statement_to_dict(v) for k, v in statements.items()})
+            result["lineItemCounts"] = {
+                k: int(len(v))
+                for k, v in statements.items()
+                if v is not None and not v.empty
             }
             return truncate_json_response(
                 json.dumps(result, indent=2, default=str),
@@ -967,7 +1020,15 @@ async def get_analyst_recommendations(
                 "recommendationTrend": recommendations.to_dict(orient="records")
                 if recommendations is not None and not recommendations.empty
                 else [],
-                "upgradesDowngrades": upgrades.reset_index().to_dict(orient="records")
+                # Same last-10 cap the markdown branch applies. Without it this
+                # frame is the full rating history, and on a widely covered
+                # stock that is ~260,000 characters - over the response limit,
+                # so the whole tool answered `response_too_large` and returned
+                # no targets and no consensus either. Measured on NVDA, AAPL,
+                # MSFT, PLTR and F: every one of them, markdown fine, JSON dead.
+                "upgradesDowngrades": upgrades.head(10)
+                .reset_index()
+                .to_dict(orient="records")
                 if upgrades is not None and not upgrades.empty
                 else [],
             }
@@ -1657,9 +1718,95 @@ async def get_market_status(
 # ============================================================================
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="yahoo-finance-mcp",
+        description="Yahoo Finance MCP server (stdio by default).",
+    )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help=(
+            "Serve over Streamable HTTP at http://HOST:PORT/mcp instead of "
+            "stdio. Use this for clients that connect to a URL rather than "
+            "spawning a process (n8n, remote agents)."
+        ),
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Interface to bind in --http mode (default: 127.0.0.1). Use "
+            "0.0.0.0 to accept connections from other containers on the host."
+        ),
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to bind in --http mode (default: 8000).",
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        metavar="HOST[:PORT]",
+        help=(
+            "Host header to accept in --http mode, repeatable. Only consulted "
+            "when --host is not loopback. Defaults to localhost, 127.0.0.1 and "
+            "host.docker.internal on the bound port."
+        ),
+    )
+    parser.add_argument(
+        "--stateful",
+        action="store_true",
+        help=(
+            "Keep a session per client in --http mode. The default is "
+            "stateless, which every tool call in this server is anyway and "
+            "which survives clients that drop the Mcp-Session-Id header."
+        ),
+    )
+    return parser
+
+
 def main() -> None:
-    """Run the MCP server with stdio transport (default for Claude Desktop)."""
-    mcp.run()
+    """Run the MCP server over stdio, or over Streamable HTTP with --http."""
+    args = _build_arg_parser().parse_args()
+
+    if not args.http:
+        mcp.run()
+        return
+
+    # These are read at run time, so setting them on the module-level server
+    # after argument parsing is enough - no second FastMCP instance.
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+    # Every tool here is a single request/response against Yahoo Finance with
+    # nothing carried between calls, so a session buys nothing and costs
+    # compatibility: a client that forgets Mcp-Session-Id gets a 400 mid-run.
+    mcp.settings.stateless_http = not args.stateful
+
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        # FastMCP picks its DNS-rebinding allow-list inside its constructor,
+        # from the host it was constructed with - and this server is built at
+        # import time on the loopback default. So binding wider here would
+        # leave that allow-list rejecting the very clients the wider bind was
+        # for, with a bare "421 Misdirected Request" and no hint why. Rebuild
+        # the list around the host actually bound instead of switching the
+        # protection off.
+        hosts = args.allowed_host or [
+            f"127.0.0.1:{args.port}",
+            f"localhost:{args.port}",
+            # the alias a container uses to reach a server on its host, which
+            # is how n8n and other dockerised clients arrive
+            f"host.docker.internal:{args.port}",
+        ]
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=hosts,
+            allowed_origins=[f"http://{h}" for h in hosts],
+        )
+
+    mcp.run(transport="streamable-http")
 
 
 if __name__ == "__main__":

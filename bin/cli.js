@@ -14,7 +14,12 @@
  *      passes straight through.
  *
  * IMPORTANT: stdout is the MCP protocol channel. This wrapper must never write
- * anything to stdout. All diagnostics go to stderr.
+ * anything to stdout. All diagnostics go to stderr. (In `--http` mode the
+ * protocol moves to the socket and stdout is free, but the rule stays: the
+ * wrapper cannot know which mode the arguments select without parsing them.)
+ *
+ * Arguments are forwarded to the Python server untouched, so `--http` and its
+ * companions work through `npx` exactly as they do on a direct invocation.
  */
 
 const { spawn, spawnSync } = require("child_process");

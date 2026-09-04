@@ -63,6 +63,47 @@ npm install -g yahoo-finance-mcp-server
 }
 ```
 
+## 🌐 HTTP mode (n8n, remote agents, anything that connects to a URL)
+
+Some clients spawn an MCP server as a child process and talk to it over stdio;
+others only take a URL. n8n's **MCP Client Tool** node is the second kind - it
+offers HTTP Streamable and SSE and no way to launch a command - so stdio alone
+puts the server out of reach.
+
+`--http` serves the same 13 tools over Streamable HTTP at `/mcp`:
+
+```bash
+npx -y yahoo-finance-mcp-server --http
+# -> http://127.0.0.1:8000/mcp
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--http` | off | Serve Streamable HTTP at `/mcp` instead of stdio |
+| `--host` | `127.0.0.1` | Interface to bind |
+| `--port` | `8000` | Port to bind |
+| `--allowed-host` | see below | Host header to accept, repeatable |
+| `--stateful` | off | Keep a session per client instead of stateless |
+
+No authentication is added, so keep it on an interface you trust.
+
+### Reaching it from a container
+
+n8n in Docker is not on your loopback interface, so bind wider and use the
+host alias:
+
+```bash
+npx -y yahoo-finance-mcp-server --http --host 0.0.0.0 --port 8931
+```
+
+Then point the MCP Client Tool node at `http://host.docker.internal:8931/mcp`
+with authentication set to **None**.
+
+DNS-rebinding protection stays on when you bind wider. `localhost`,
+`127.0.0.1` and `host.docker.internal` on the bound port are accepted by
+default; any other name needs `--allowed-host name:port`, and a request
+arriving under an unlisted name gets `421 Misdirected Request`.
+
 ## 🔧 Available Tools
 
 | Tool | What it returns | Parameters |
