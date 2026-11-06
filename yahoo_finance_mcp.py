@@ -28,7 +28,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 # stderr stream of an MCP stdio server. The JSON-RPC channel is stdout only.
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 # Initialize the MCP server
 mcp = MCPServer(
@@ -75,7 +75,12 @@ def _get_session():
     try:
         from curl_cffi import requests as _creq
 
-        _SESSION = _creq.Session(impersonate="chrome")
+        # Safari, not Chrome: on curl_cffi 0.17 (which yfinance 1.8 requires) the
+        # chrome and firefox profiles stall the first request on every new thread
+        # for seconds, against any host, so a burst of parallel calls queued up
+        # for ~8s. safari and edge do not (measured 2026-11-06, 8 threads: chrome
+        # 7.7s, safari 0.56s). Re-measure before switching back.
+        _SESSION = _creq.Session(impersonate="safari")
     except Exception:
         _SESSION = None  # fall back to yfinance's built-in session
     return _SESSION

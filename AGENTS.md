@@ -18,8 +18,8 @@ Rules for an agent changing this repo. For what the server does, read `llms.txt`
 - A tool that reads `.info` calls `_require_known()`: yfinance does not raise for an unknown symbol, it returns empty fields.
 - `_norm_ticker()` rewrites class shares (BRK.B, BRK/B) to Yahoo's BRK-B. Every ticker argument goes through it.
 - Use `make_ticker()` and `_get_session()` so every call shares one browser-impersonating session.
-- curl_cffi 0.17 (required by yfinance 1.8) stalls the first request on each new thread, so the first parallel burst after startup is slow (about 8s for 8 quotes). It reproduces with plain curl_cffi, without yfinance. Do not cap curl_cffi below 0.17: yfinance 1.8 refuses to install with it.
-- Concurrency check before a release: over `--http`, fire three bursts of 8 parallel `get_stock_quote` calls. Bursts after the first should finish in about 1 second.
+- The shared session impersonates `safari`, not `chrome`. On curl_cffi 0.17 (required by yfinance 1.8) the `chrome` and `firefox` profiles stall the first request on every new thread, against any host, so parallel bursts queued up for ~8s. `safari` and `edge` do not. Do not switch back without re-running the concurrency check.
+- Concurrency check before a release: over `--http`, fire three bursts of 8 parallel `get_stock_quote` calls. Every burst, including the first and one after 20 seconds idle, should finish in about 1 second.
 
 ## Checks before a release
 

@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-11-06
+
+### Fixed
+
+- The first burst of parallel calls after startup took about 8 seconds for 8
+  quotes. The cause is curl_cffi 0.17 (required by yfinance 1.8): its `chrome`
+  and `firefox` impersonation profiles stall the first request on every new
+  thread, against any host. The shared session now impersonates Safari, which
+  does not. Measured over HTTP, 8 parallel quotes: 1.26s on the first burst
+  (was 7.7s), 1.06s on the next, 0.93s after 20 seconds idle.
+
 ## [1.5.0] - 2026-11-06
 
 ### Changed
@@ -39,11 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known issue
 
-- curl_cffi 0.17, which yfinance 1.8 requires, stalls the first request on each
-  new thread: the first burst of parallel calls after the server starts takes
-  about 8 seconds for 8 quotes. Later bursts take under a second (measured over
-  HTTP: 7.7s, then 0.73s and 0.69s), because the server reuses its worker
-  threads. Single calls are unaffected.
+- The first burst of parallel calls after startup is slow on curl_cffi 0.17.
+  Fixed in 1.5.1.
 
 ## [1.4.0] - 2026-11-06
 
