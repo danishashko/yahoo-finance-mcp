@@ -9,6 +9,8 @@ Built with the MCP Python SDK (MCPServer) and yfinance.
 """
 
 import argparse
+import functools
+import inspect
 import json
 import logging
 import math
@@ -18,17 +20,18 @@ from typing import Annotated, Any, Dict, List
 
 import yfinance as yf
 import pandas as pd
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import CallToolResult, TextContent
 
 # Keep yfinance from emitting warnings/progress that could clutter the
 # stderr stream of an MCP stdio server. The JSON-RPC channel is stdout only.
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-__version__ = "1.5.1"
+__version__ = "1.6.0"
 
 # Initialize the MCP server
 mcp = MCPServer(
@@ -151,6 +154,19 @@ class OptionType(str, Enum):
     BOTH = "both"
 
 
+class MarketRegion(str, Enum):
+    """Markets yfinance's Market() accepts."""
+
+    US = "US"
+    GB = "GB"
+    ASIA = "ASIA"
+    EUROPE = "EUROPE"
+    RATES = "RATES"
+    COMMODITIES = "COMMODITIES"
+    CURRENCIES = "CURRENCIES"
+    CRYPTOCURRENCIES = "CRYPTOCURRENCIES"
+
+
 class HolderType(str, Enum):
     """Category of ownership data."""
 
@@ -197,7 +213,10 @@ def _require_known(info: Dict[str, Any], ticker: str) -> None:
     with nothing in it and an agent had no signal that the ticker was wrong.
     """
     has_name = info.get("shortName") or info.get("longName")
-    has_price = info.get("regularMarketPrice") is not None or info.get("currentPrice") is not None
+    has_price = (
+        info.get("regularMarketPrice") is not None
+        or info.get("currentPrice") is not None
+    )
     if not has_name and not has_price:
         raise _unknown_symbol(ticker)
 
@@ -352,6 +371,8 @@ def _finite(value: Any) -> Any:
     """
     if isinstance(value, float):
         return value if math.isfinite(value) else None
+    if isinstance(value, str) and value == "N/A":
+        return None  # the Markdown placeholder; JSON says missing with null
     if isinstance(value, dict):
         return {k: _finite(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -396,7 +417,13 @@ def _statement_to_dict(df: Any, max_rows: int = 30) -> Dict[str, Any]:
     return out.to_dict()
 
 
-def _fit_records(records: List[Any], envelope: Dict[str, Any], key: str) -> str:
+def _fit_records(
+    records: List[Any],
+    envelope: Dict[str, Any],
+    key: str,
+    hint: str = "Narrow the period or widen the interval for full coverage.",
+    newest_first: bool = False,
+) -> str:
     """Serialise as many of the newest records as the response limit allows.
 
     The JSON branch refuses an oversized payload outright rather than trimming
@@ -407,14 +434,12 @@ def _fit_records(records: List[Any], envelope: Dict[str, Any], key: str) -> str:
     kept = len(records)
     while True:
         body = dict(envelope)
-        body[key] = records[len(records) - kept :] if kept else []
+        kept_rows = records[len(records) - kept :] if kept else []
+        body[key] = kept_rows[::-1] if newest_first else kept_rows
         body["returnedRecords"] = kept
         body["truncated"] = kept < len(records)
         if body["truncated"]:
-            body["note"] = (
-                f"Newest {kept} of {len(records)} records. Narrow the period or "
-                "widen the interval for full coverage."
-            )
+            body["note"] = f"Newest {kept} of {len(records)} records. {hint}"
         payload = _json(body)
         if len(payload) <= CHARACTER_LIMIT or kept == 0:
             return payload
@@ -447,7 +472,418 @@ def truncate_json_response(payload: str, message: str = "") -> str:
         f"Response was too large (~{len(payload)} characters) and was not returned in full. "
         f"{message}".strip()
     )
-    return json.dumps({"error": "response_too_large", "message": note}, indent=2)
+    raise _TooLarge(note)
+
+
+# ============================================================================
+# STRUCTURED OUTPUT
+# ============================================================================
+#
+# Every tool returns two things: text for the model to read (Markdown, or JSON
+# when response_format='json') and the same data as `structuredContent`, typed
+# by the tool's published `outputSchema`. A client that understands structured
+# output reads fields directly; one that does not reads the text as before.
+#
+# The schemas are published but not enforced at call time: a field Yahoo
+# returns in an unexpected type must not turn a good answer into an error.
+# The release checks validate every tool's structuredContent against its
+# schema instead (see AGENTS.md).
+
+
+class _TooLarge(Exception):
+    """A JSON payload over CHARACTER_LIMIT."""
+
+
+class _Out(BaseModel):
+    """Fields every tool's structured output may carry."""
+
+    model_config = ConfigDict(extra="allow")
+    message: str | None = Field(
+        None,
+        description="Set instead of data when there is nothing to return for this request (for example, no dividends on record).",
+    )
+
+
+class _Row(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+
+Num = float | None
+Str = str | None
+
+
+class QuoteOut(_Out):
+    ticker: Str = None
+    longName: Str = None
+    currency: Str = Field(
+        None,
+        description="ISO currency of every price field, e.g. USD, JPY, GBp (pence).",
+    )
+    exchange: Str = None
+    marketState: Str = Field(
+        None, description="PRE, REGULAR, POST, CLOSED and similar."
+    )
+    regularMarketTime: Str = Field(
+        None,
+        description="ISO 8601 time of the last regular-session price, in the exchange's timezone.",
+    )
+    quoteType: Str = None
+    currentPrice: Num = None
+    previousClose: Num = None
+    change: Num = None
+    changePercent: Num = None
+    open: Num = None
+    dayLow: Num = None
+    dayHigh: Num = None
+    fiftyTwoWeekLow: Num = None
+    fiftyTwoWeekHigh: Num = None
+    volume: Num = None
+    averageVolume: Num = None
+    marketCap: Num = None
+    beta: Num = None
+    trailingPE: Num = None
+    trailingEps: Num = None
+    dividendYield: Num = Field(None, description="Percent, e.g. 0.41 means 0.41%.")
+    sector: Str = None
+    industry: Str = None
+    website: Str = None
+
+
+class PriceBar(_Row):
+    Date: Str = None
+    Open: Num = None
+    High: Num = None
+    Low: Num = None
+    Close: Num = None
+    Volume: Num = None
+    Dividends: Num = None
+    Stock_Splits: Num = Field(None, alias="Stock Splits")
+
+
+class HistoryOut(_Out):
+    ticker: Str = None
+    period: Str = None
+    interval: Str = None
+    totalRecords: int | None = None
+    returnedRecords: int | None = None
+    truncated: bool | None = Field(
+        None, description="True when only the newest records fit the response limit."
+    )
+    note: Str = None
+    data: list[PriceBar] | None = None
+
+
+class CompanyInfoOut(_Out):
+    """Yahoo's full company profile; the listed fields are the most used of ~180."""
+
+    symbol: Str = None
+    longName: Str = None
+    currency: Str = None
+    sector: Str = None
+    industry: Str = None
+    country: Str = None
+    website: Str = None
+    longBusinessSummary: Str = None
+    fullTimeEmployees: Num = None
+    marketCap: Num = None
+    enterpriseValue: Num = None
+    trailingPE: Num = None
+    forwardPE: Num = None
+    priceToBook: Num = None
+    profitMargins: Num = None
+    revenueGrowth: Num = None
+    totalRevenue: Num = None
+    totalCash: Num = None
+    totalDebt: Num = None
+    freeCashflow: Num = None
+    companyOfficers: list[dict[str, Any]] | None = None
+
+
+class StatementsOut(_Out):
+    ticker: Str = None
+    incomeStatement: dict[str, dict[str, Num]] | None = Field(
+        None, description="Period end date -> line item -> value."
+    )
+    balanceSheet: dict[str, dict[str, Num]] | None = None
+    cashFlow: dict[str, dict[str, Num]] | None = None
+    lineItemCounts: dict[str, int] | None = None
+
+
+class CompareRow(_Row):
+    Ticker: Str = None
+    Name: Str = None
+    Currency: Str = None
+    Price: Num = None
+    Change_pct: Num = Field(None, alias="Change%")
+    MarketCap: Num = None
+    PE: Num = None
+    EPS: Num = None
+    DivYield_pct: Num = Field(None, alias="DivYield%")
+    Beta: Num = None
+    High52w: Num = Field(None, alias="52WkHigh")
+    Low52w: Num = Field(None, alias="52WkLow")
+    Volume: Num = None
+    AvgVolume: Num = None
+    Sector: Str = None
+    Industry: Str = None
+    Error: Str = Field(None, description="Set when this ticker could not be fetched.")
+
+
+class CompareOut(_Out):
+    tickers: list[str] | None = None
+    comparison: list[CompareRow] | None = None
+
+
+class RecommendationsOut(_Out):
+    ticker: Str = None
+    priceTargets: dict[str, Num] | None = None
+    consensus: dict[str, Any] | None = None
+    recommendationTrend: list[dict[str, Any]] | None = None
+    upgradesDowngrades: list[dict[str, Any]] | None = None
+
+
+class NewsItem(_Row):
+    title: Str = None
+    provider: Str = None
+    pubDate: Str = None
+    summary: Str = None
+    url: Str = None
+    tickers: list[str] | None = Field(
+        None, description="Tickers Yahoo tagged the story with, lead ticker first."
+    )
+    primarilyAbout: bool | None = Field(
+        None, description="True when the story is led by the requested ticker."
+    )
+
+
+class NewsOut(_Out):
+    ticker: Str = None
+    count: int | None = None
+    news: list[NewsItem] | None = None
+
+
+class OptionsOut(_Out):
+    ticker: Str = None
+    expirationDates: list[str] | None = Field(
+        None, description="Present when no expiration_date was given."
+    )
+    expirationDate: Str = None
+    underlyingPrice: Num = None
+    strikesPerSide: int | None = None
+    truncated: bool | None = Field(
+        None, description="True when only the strikes nearest the underlying price fit."
+    )
+    note: Str = None
+    calls: list[dict[str, Any]] | None = None
+    puts: list[dict[str, Any]] | None = None
+
+
+class HoldersOut(_Out):
+    ticker: Str = None
+    holderType: Str = None
+    data: list[dict[str, Any]] | None = Field(
+        None,
+        description="One row per holder or transaction; columns depend on holderType.",
+    )
+    returnedRecords: int | None = None
+    truncated: bool | None = None
+    note: Str = None
+
+
+class DividendsOut(_Out):
+    ticker: Str = None
+    dividends: list[dict[str, Any]] | None = Field(
+        None, description="{date, amount} per payment."
+    )
+    splits: list[dict[str, Any]] | None = Field(
+        None, description="{date, ratio} per split."
+    )
+
+
+class EstimatesOut(_Out):
+    ticker: Str = None
+    priceTargets: dict[str, Num] | None = None
+    earningsEstimate: list[dict[str, Any]] | None = None
+    revenueEstimate: list[dict[str, Any]] | None = None
+    growthEstimates: list[dict[str, Any]] | None = None
+
+
+class SymbolMatch(_Row):
+    symbol: Str = None
+    name: Str = None
+    exchange: Str = None
+    type: Str = None
+    sector: Str = None
+    industry: Str = None
+
+
+class SearchOut(_Out):
+    query: Str = None
+    count: int | None = None
+    results: list[SymbolMatch] | None = None
+
+
+class MarketStatusOut(_Out):
+    region: Str = None
+    status: dict[str, Any] | None = None
+    summary: dict[str, Any] | None = None
+
+
+class EarningsOut(_Out):
+    ticker: Str = None
+    nextEarningsDate: Str = None
+    nextEarningsWindow: list[str] | None = None
+    daysUntilEarnings: int | None = None
+    epsEstimate: dict[str, Num] | None = None
+    revenueEstimate: dict[str, Num] | None = None
+    exDividendDate: Str = None
+    beats: int | None = None
+    reportsWithSurprise: int | None = None
+    history: list[dict[str, Any]] | None = Field(
+        None,
+        description="{date, epsEstimate, reportedEps, surprisePercent} per report.",
+    )
+
+
+class EarningsCalendarRow(_Row):
+    symbol: Str = None
+    company: Str = None
+    marketCap: Num = None
+    event: Str = None
+    date: Str = None
+    timing: Str = Field(
+        None,
+        description="BMO (before open), AMC (after close) or TNS (time not supplied).",
+    )
+    epsEstimate: Num = None
+    reportedEps: Num = None
+    surprisePercent: Num = None
+
+
+class EarningsCalendarOut(_Out):
+    start: Str = None
+    end: Str = None
+    count: int | None = None
+    earnings: list[EarningsCalendarRow] | None = None
+
+
+class ScreenRow(_Row):
+    symbol: Str = None
+    name: Str = None
+    type: Str = None
+    price: Num = None
+    changePercent: Num = None
+    volume: Num = None
+    relativeVolume: Num = Field(
+        None, description="Today's volume divided by the 3-month average."
+    )
+    marketCap: Num = None
+    trailingPE: Num = None
+    forwardPE: Num = None
+    fiftyTwoWeekLow: Num = None
+    fiftyTwoWeekHigh: Num = None
+    exchange: Str = None
+
+
+class ScreenOut(_Out):
+    screener: Str = None
+    title: Str = None
+    total: int | None = None
+    count: int | None = None
+    results: list[ScreenRow] | None = None
+
+
+class FundOut(_Out):
+    ticker: Str = None
+    overview: dict[str, Any] | None = None
+    description: Str = None
+    operations: dict[str, dict[str, Num]] | None = Field(
+        None, description="Attribute -> {fund, categoryAverage}."
+    )
+    topHoldings: list[dict[str, Any]] | None = Field(
+        None, description="{symbol, name, weight} with weight as a fraction."
+    )
+    sectorWeightings: dict[str, Num] | None = None
+    assetClasses: dict[str, Num] | None = None
+
+
+class SectorOut(_Out):
+    sector: Str = None
+    industry: Str = None
+    name: Str = None
+    overview: dict[str, Any] | None = None
+    topCompanies: list[dict[str, Any]] | None = None
+    industries: list[dict[str, Any]] | None = Field(
+        None,
+        description="Present for a sector; each row's key is a valid industry argument.",
+    )
+    topGrowthCompanies: list[dict[str, Any]] | None = None
+    topPerformingCompanies: list[dict[str, Any]] | None = None
+
+
+_OUTPUT_MODELS: Dict[str, type[_Out]] = {}
+
+
+def structured(model: type[_Out]):
+    """Register a tool's output model and turn a plain-text return into a result.
+
+    A tool returns either a finished CallToolResult (from _respond) or a short
+    string such as "No dividend history available", which becomes the text and
+    `{"message": ...}` as structured content.
+    """
+
+    def wrap(fn):
+        _OUTPUT_MODELS[fn.__name__] = model
+
+        @functools.wraps(fn)
+        def run(*args, **kwargs):
+            result = fn(*args, **kwargs)
+            if isinstance(result, CallToolResult):
+                return result
+            text = str(result)
+            return CallToolResult(
+                content=[TextContent(type="text", text=text)],
+                structured_content={"message": text},
+            )
+
+        run.__signature__ = inspect.signature(fn).replace(
+            return_annotation=CallToolResult
+        )
+        run.__annotations__ = {**fn.__annotations__, "return": CallToolResult}
+        return run
+
+    return wrap
+
+
+def _respond(fmt: "ResponseFormat", md, js) -> CallToolResult:
+    """Build the text in the requested format plus the structured copy.
+
+    The JSON payload is always built: it is the structured content. When it is
+    over the response limit, a JSON request fails with a ToolError naming the
+    fix, and a Markdown request still gets its text with a short message as
+    the structured part.
+    """
+    try:
+        json_text = js()
+        structured_content = json.loads(json_text)
+        if not isinstance(structured_content, dict):
+            structured_content = {"data": structured_content}
+    except _TooLarge as exc:
+        if fmt != ResponseFormat.MARKDOWN:
+            raise ToolError(str(exc)) from exc
+        json_text, structured_content = None, {"message": str(exc)}
+    text = md() if fmt == ResponseFormat.MARKDOWN else json_text
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        structured_content=structured_content,
+    )
+
+
+def _publish_output_schemas() -> None:
+    """Attach each tool's output schema. The SDK reads it live on tools/list."""
+    for name, model in _OUTPUT_MODELS.items():
+        tool = mcp._tool_manager.get_tool(name)
+        tool.fn_metadata.output_schema = model.model_json_schema(by_alias=True)
 
 
 # ============================================================================
@@ -466,6 +902,7 @@ def truncate_json_response(payload: str, message: str = "") -> str:
         "openWorldHint": True,
     },
 )
+@structured(QuoteOut)
 def get_stock_quote(
     ticker: Annotated[
         str,
@@ -518,7 +955,7 @@ def get_stock_quote(
             change = "N/A"
             change_pct = "N/A"
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# {safe_get(info, 'longName', ticker)} ({ticker})\n\n"
             result += f"**Current Price:** {format_currency(current_price, cur)}\n"
             result += f"**Market:** {_market_line(info)}\n"
@@ -545,7 +982,9 @@ def get_stock_quote(
             result += f"- **Market Cap:** {format_large_number(safe_get(info, 'marketCap'))}\n"
             result += f"- **Beta:** {safe_get(info, 'beta')}\n"
             result += f"- **PE Ratio:** {safe_get(info, 'trailingPE')}\n"
-            result += f"- **EPS:** {format_currency(safe_get(info, 'trailingEps'), cur)}\n"
+            result += (
+                f"- **EPS:** {format_currency(safe_get(info, 'trailingEps'), cur)}\n"
+            )
             result += f"- **Dividend Yield:** {format_dividend_yield(safe_get(info, 'dividendYield'))}\n"
 
             result += "\n## Company Info\n"
@@ -556,7 +995,8 @@ def get_stock_quote(
             return truncate_response(
                 result, "Use get_company_info for more detailed information."
             )
-        else:
+
+        def _js():
             result = {
                 "ticker": ticker,
                 "longName": safe_get(info, "longName"),
@@ -587,6 +1027,8 @@ def get_stock_quote(
             }
             return _json(result)
 
+        return _respond(response_format, _md, _js)
+
     except Exception as e:
         return _error("quote", ticker, e)
 
@@ -602,6 +1044,7 @@ def get_stock_quote(
         "openWorldHint": True,
     },
 )
+@structured(HistoryOut)
 def get_historical_prices(
     ticker: Annotated[
         str,
@@ -642,7 +1085,7 @@ def get_historical_prices(
         if hist.empty:
             return f"No historical data available for {ticker} with period={period.value} and interval={interval.value}"
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Historical Prices: {ticker}\n\n"
             result += f"**Period:** {period.value} | **Interval:** {interval.value}\n\n"
             result += f"**Date Range:** {hist.index[0].strftime('%Y-%m-%d')} to {hist.index[-1].strftime('%Y-%m-%d')}\n"
@@ -672,7 +1115,8 @@ def get_historical_prices(
                 result,
                 "Request smaller time period or use JSON format for complete data.",
             )
-        else:
+
+        def _js():
             hist_dict = hist.reset_index().to_dict(orient="records")
             for record in hist_dict:
                 if "Date" in record:
@@ -691,6 +1135,8 @@ def get_historical_prices(
                 "data",
             )
 
+        return _respond(response_format, _md, _js)
+
     except Exception as e:
         return _error("historical prices", ticker, e)
 
@@ -706,6 +1152,7 @@ def get_historical_prices(
         "openWorldHint": True,
     },
 )
+@structured(CompanyInfoOut)
 def get_company_info(
     ticker: Annotated[
         str,
@@ -735,7 +1182,7 @@ def get_company_info(
         _require_known(info, ticker)
         cur = info.get("currency") or "USD"
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# {safe_get(info, 'longName', ticker)} ({ticker})\n\n"
 
             result += "## Business Summary\n\n"
@@ -811,11 +1258,14 @@ def get_company_info(
             result += f"- **Free Cash Flow:** {format_large_number(safe_get(info, 'freeCashflow'))}\n"
 
             return truncate_response(result, "")
-        else:
+
+        def _js():
             return truncate_json_response(
                 _json(info),
                 "Use markdown format for a summarized view.",
             )
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("company info", ticker, e)
@@ -832,6 +1282,7 @@ def get_company_info(
         "openWorldHint": True,
     },
 )
+@structured(StatementsOut)
 def get_financial_statements(
     ticker: Annotated[
         str,
@@ -862,7 +1313,7 @@ def get_financial_statements(
         balance_sheet = ticker_obj.balance_sheet
         cash_flow = ticker_obj.cashflow
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Financial Statements: {ticker}\n\n"
 
             if income_stmt is not None and not income_stmt.empty:
@@ -885,7 +1336,8 @@ def get_financial_statements(
             return truncate_response(
                 result, "Request specific statement types separately if needed."
             )
-        else:
+
+        def _js():
             statements = {
                 "incomeStatement": income_stmt,
                 "balanceSheet": balance_sheet,
@@ -903,6 +1355,8 @@ def get_financial_statements(
                 "Use markdown format for a summarized view.",
             )
 
+        return _respond(response_format, _md, _js)
+
     except Exception as e:
         return _error("financial statements", ticker, e)
 
@@ -918,6 +1372,7 @@ def get_financial_statements(
         "openWorldHint": True,
     },
 )
+@structured(CompareOut)
 def compare_stocks(
     tickers: Annotated[
         List[str],
@@ -978,7 +1433,7 @@ def compare_stocks(
                 + "; ".join(f"{d['Ticker']}: {d['Error']}" for d in comparison_data)
             )
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Stock Comparison: {', '.join(tickers)}\n\n"
 
             df = pd.DataFrame(comparison_data)
@@ -1011,9 +1466,12 @@ def compare_stocks(
                     result += f"- **Highest Dividend Yield:** {best_div[0]} at {format_dividend_yield(best_div[1])}\n"
 
             return truncate_response(result, "")
-        else:
+
+        def _js():
             result = {"tickers": tickers, "comparison": comparison_data}
             return truncate_json_response(_json(result), "")
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("comparison", ", ".join(tickers), e)
@@ -1030,6 +1488,7 @@ def compare_stocks(
         "openWorldHint": True,
     },
 )
+@structured(RecommendationsOut)
 def get_analyst_recommendations(
     ticker: Annotated[
         str,
@@ -1072,7 +1531,7 @@ def get_analyst_recommendations(
         except Exception:
             upgrades = None
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Analyst Recommendations: {ticker}\n\n"
 
             result += "## Price Targets\n\n"
@@ -1131,7 +1590,8 @@ def get_analyst_recommendations(
                 result += "No recommendation trend data available.\n"
 
             return truncate_response(result, "")
-        else:
+
+        def _js():
             result = {
                 "ticker": ticker,
                 "priceTargets": {
@@ -1163,6 +1623,8 @@ def get_analyst_recommendations(
             }
             return truncate_json_response(_json(result), "")
 
+        return _respond(response_format, _md, _js)
+
     except Exception as e:
         return _error("analyst recommendations", ticker, e)
 
@@ -1178,6 +1640,7 @@ def get_analyst_recommendations(
         "openWorldHint": True,
     },
 )
+@structured(NewsOut)
 def get_market_news(
     ticker: Annotated[
         str,
@@ -1214,12 +1677,18 @@ def get_market_news(
 
         def tags(article: Dict[str, Any]) -> List[str]:
             fin = (article.get("content", article) or {}).get("finance") or {}
-            return [x.get("symbol") for x in fin.get("stockTickers") or [] if x.get("symbol")]
+            return [
+                x.get("symbol")
+                for x in fin.get("stockTickers") or []
+                if x.get("symbol")
+            ]
 
         def about(article: Dict[str, Any]) -> bool:
             t = tags(article)
             title = (article.get("content", article) or {}).get("title") or ""
-            return (bool(t) and t[0] == ticker) or re.search(rf"\b{re.escape(ticker)}\b", title) is not None
+            return (bool(t) and t[0] == ticker) or re.search(
+                rf"\b{re.escape(ticker)}\b", title
+            ) is not None
 
         articles = sorted(articles, key=lambda a: not about(a))[:count]
 
@@ -1243,7 +1712,7 @@ def get_market_news(
         if not articles:
             return f"No recent news found for {ticker}."
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Latest News: {ticker}\n\n"
             for i, article in enumerate(articles[:count], 1):
                 c = field(article)
@@ -1254,7 +1723,11 @@ def get_market_news(
                     summary = summary[:400].rstrip() + "..."
                 result += f"## {i}. {title}\n"
                 tagged = ", ".join(tags(article)[:6])
-                meta = " | ".join(x for x in [provider(c), date, f"tickers: {tagged}" if tagged else ""] if x and x != "N/A")
+                meta = " | ".join(
+                    x
+                    for x in [provider(c), date, f"tickers: {tagged}" if tagged else ""]
+                    if x and x != "N/A"
+                )
                 if meta:
                     result += f"*{meta}*\n\n"
                 if summary:
@@ -1263,7 +1736,8 @@ def get_market_news(
             return truncate_response(
                 result, "Request fewer articles for a shorter response."
             )
-        else:
+
+        def _js():
             items = []
             for article in articles[:count]:
                 c = field(article)
@@ -1279,9 +1753,9 @@ def get_market_news(
                     }
                 )
             payload = {"ticker": ticker, "count": len(items), "news": items}
-            return truncate_json_response(
-                _json(payload), ""
-            )
+            return truncate_json_response(_json(payload), "")
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("market news", ticker, e)
@@ -1298,6 +1772,7 @@ def get_market_news(
         "openWorldHint": True,
     },
 )
+@structured(OptionsOut)
 def get_options_chain(
     ticker: Annotated[
         str,
@@ -1342,14 +1817,18 @@ def get_options_chain(
 
         # No date requested -> return the menu of available expirations.
         if not expiration_date.strip():
-            if response_format == ResponseFormat.MARKDOWN:
+
+            def _md_dates():
                 result = f"# Options Expirations: {ticker}\n\n"
                 result += f"**{len(expirations)} available expiration dates:**\n\n"
                 result += ", ".join(expirations)
                 result += "\n\n*Call again with an `expiration_date` to get the chain.*"
                 return result
-            return json.dumps(
-                {"ticker": ticker, "expirationDates": expirations}, indent=2
+
+            return _respond(
+                response_format,
+                _md_dates,
+                lambda: _json({"ticker": ticker, "expirationDates": expirations}),
             )
 
         if expiration_date not in expirations:
@@ -1361,32 +1840,70 @@ def get_options_chain(
         chain = t.option_chain(expiration_date)
         want_calls = option_type in (OptionType.CALLS, OptionType.BOTH)
         want_puts = option_type in (OptionType.PUTS, OptionType.BOTH)
+        spot = (getattr(chain, "underlying", None) or {}).get("regularMarketPrice")
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def near_money(df: pd.DataFrame, n: int) -> pd.DataFrame:
+            """The n strikes closest to the current price, in strike order.
+
+            A chain runs to 70+ strikes a side and starts deep in the money,
+            so the first rows are the least useful ones and a whole chain is
+            over the response limit. Without a spot price, keep the first n.
+            """
+            if df is None or df.empty or n >= len(df):
+                return df
+            if not isinstance(spot, (int, float)):
+                return df.head(n)
+            return df.loc[(df["strike"] - spot).abs().nsmallest(n).index].sort_values(
+                "strike"
+            )
+
+        def _md():
             result = f"# Options Chain: {ticker} ({expiration_date})\n\n"
+            if isinstance(spot, (int, float)):
+                result += f"Underlying: {spot:,.2f}. Showing the 40 strikes nearest it per side.\n\n"
             if want_calls:
                 result += "## Calls\n\n"
-                result += dataframe_to_markdown(chain.calls, max_rows=40)
+                result += dataframe_to_markdown(
+                    near_money(chain.calls, 40), max_rows=40
+                )
                 result += "\n\n"
             if want_puts:
                 result += "## Puts\n\n"
-                result += dataframe_to_markdown(chain.puts, max_rows=40)
+                result += dataframe_to_markdown(near_money(chain.puts, 40), max_rows=40)
                 result += "\n\n"
             return truncate_response(
-                result, "Request a single option_type or use JSON for the full chain."
+                result, "Request a single option_type for more strikes."
             )
-        else:
-            payload: Dict[str, Any] = {
-                "ticker": ticker,
-                "expirationDate": expiration_date,
-            }
-            if want_calls:
-                payload["calls"] = chain.calls.to_dict(orient="records")
-            if want_puts:
-                payload["puts"] = chain.puts.to_dict(orient="records")
-            return truncate_json_response(
-                _json(payload), ""
-            )
+
+        def _js():
+            sides = [
+                x for x, want in (("calls", want_calls), ("puts", want_puts)) if want
+            ]
+            total = max(len(getattr(chain, x)) for x in sides)
+            keep = total
+            while True:
+                payload: Dict[str, Any] = {
+                    "ticker": ticker,
+                    "expirationDate": expiration_date,
+                    "underlyingPrice": spot,
+                }
+                for x in sides:
+                    payload[x] = near_money(getattr(chain, x), keep).to_dict(
+                        orient="records"
+                    )
+                payload["strikesPerSide"] = keep
+                payload["truncated"] = keep < total
+                if payload["truncated"]:
+                    payload["note"] = (
+                        f"The {keep} strikes nearest the underlying price per side, of {total}. "
+                        "Request a single option_type for more."
+                    )
+                text = _json(payload)
+                if len(text) <= CHARACTER_LIMIT or keep <= 1:
+                    return truncate_json_response(text, "")
+                keep = keep * 3 // 4
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("options chain", ticker, e)
@@ -1403,6 +1920,7 @@ def get_options_chain(
         "openWorldHint": True,
     },
 )
+@structured(HoldersOut)
 def get_holders(
     ticker: Annotated[
         str,
@@ -1463,21 +1981,27 @@ def get_holders(
         if df is None or (hasattr(df, "empty") and df.empty):
             return f"No {title.lower()} data available for {ticker}."
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# {title}: {ticker}\n\n"
             result += dataframe_to_markdown(df, max_rows=40)
             return truncate_response(
                 result, "Use JSON format for the complete dataset."
             )
-        else:
-            payload = {
-                "ticker": ticker,
-                "holderType": holder_type.value,
-                "data": df.reset_index().to_dict(orient="records"),
-            }
-            return truncate_json_response(
-                _json(payload), ""
+
+        def _js():
+            records = df.reset_index().to_dict(orient="records")
+            # Insider transactions run to hundreds of rows; keep the newest
+            # that fit rather than refusing the whole payload.
+            insider = holder_type == HolderType.INSIDER_TRANSACTIONS
+            return _fit_records(
+                records[::-1] if insider else records,  # Yahoo lists trades newest first
+                {"ticker": ticker, "holderType": holder_type.value},
+                "data",
+                hint="Older trades did not fit the response limit.",
+                newest_first=insider,
             )
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("holders", ticker, e)
@@ -1494,6 +2018,7 @@ def get_holders(
         "openWorldHint": True,
     },
 )
+@structured(DividendsOut)
 def get_dividends_splits(
     ticker: Annotated[
         str,
@@ -1528,7 +2053,7 @@ def get_dividends_splits(
         if not has_div and not has_splits:
             return f"No dividend or split history available for {ticker} (it may not pay dividends)."
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Dividends & Splits: {ticker}\n\n"
 
             if has_div:
@@ -1560,7 +2085,8 @@ def get_dividends_splits(
             return truncate_response(
                 result, "Use JSON format for the complete history."
             )
-        else:
+
+        def _js():
             payload = {
                 "ticker": ticker,
                 "dividends": [
@@ -1576,9 +2102,9 @@ def get_dividends_splits(
                 if has_splits
                 else [],
             }
-            return truncate_json_response(
-                _json(payload), ""
-            )
+            return truncate_json_response(_json(payload), "")
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("dividends and splits", ticker, e)
@@ -1595,6 +2121,7 @@ def get_dividends_splits(
         "openWorldHint": True,
     },
 )
+@structured(EstimatesOut)
 def get_analyst_estimates(
     ticker: Annotated[
         str,
@@ -1631,7 +2158,7 @@ def get_analyst_estimates(
         if not targets and not has(eps_est) and not has(rev_est):
             return f"No analyst estimate data available for {ticker}."
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Analyst Estimates: {ticker}\n\n"
 
             if targets:
@@ -1669,7 +2196,8 @@ def get_analyst_estimates(
             return truncate_response(
                 result, "Use JSON format for the complete dataset."
             )
-        else:
+
+        def _js():
 
             def df_records(df):
                 return df.reset_index().to_dict(orient="records") if has(df) else []
@@ -1681,9 +2209,9 @@ def get_analyst_estimates(
                 "revenueEstimate": df_records(rev_est),
                 "growthEstimates": df_records(growth),
             }
-            return truncate_json_response(
-                _json(payload), ""
-            )
+            return truncate_json_response(_json(payload), "")
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("analyst estimates", ticker, e)
@@ -1700,6 +2228,7 @@ def get_analyst_estimates(
         "openWorldHint": True,
     },
 )
+@structured(SearchOut)
 def search_symbols(
     query: Annotated[
         str,
@@ -1741,7 +2270,7 @@ def search_symbols(
         if not quotes:
             return f"No symbols found matching '{query}'."
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f'# Symbol Search: "{query}"\n\n'
             for q in quotes:
                 sym = q.get("symbol", "?")
@@ -1754,7 +2283,8 @@ def search_symbols(
                     result += f" ({extra})"
                 result += "\n"
             return truncate_response(result, "")
-        else:
+
+        def _js():
             items = [
                 {
                     "symbol": q.get("symbol"),
@@ -1767,9 +2297,9 @@ def search_symbols(
                 for q in quotes
             ]
             payload = {"query": query, "count": len(items), "results": items}
-            return truncate_json_response(
-                _json(payload), ""
-            )
+            return truncate_json_response(_json(payload), "")
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("symbol search", query, e)
@@ -1786,15 +2316,14 @@ def search_symbols(
         "openWorldHint": True,
     },
 )
+@structured(MarketStatusOut)
 def get_market_status(
     region: Annotated[
-        str,
+        MarketRegion,
         Field(
-            description="Market region code (e.g., 'US', 'GB', 'CA', 'DE', 'FR', 'IN', 'JP', 'HK', 'AU')",
-            min_length=2,
-            max_length=3,
+            description="Market: US, GB, ASIA, EUROPE, RATES, COMMODITIES, CURRENCIES or CRYPTOCURRENCIES"
         ),
-    ] = "US",
+    ] = MarketRegion.US,
     response_format: Annotated[
         ResponseFormat,
         Field(
@@ -1808,7 +2337,7 @@ def get_market_status(
 
     Returns Markdown by default, or JSON when response_format='json'. An unrecognized region returns a short message.
     """
-    region = region.strip().upper()
+    region = region.value
     try:
         session = _get_session()
         try:
@@ -1826,7 +2355,7 @@ def get_market_status(
         if not status and not summary:
             return f"No market data available for region '{region}'. Try a code like 'US', 'GB', or 'JP'."
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Market Status: {status.get('name', region)}\n\n"
             state = status.get("status", "unknown")
             result += f"- **Status:** {str(state).upper()}\n"
@@ -1861,11 +2390,12 @@ def get_market_status(
                     result += line + "\n"
 
             return truncate_response(result, "")
-        else:
+
+        def _js():
             payload = {"region": region, "status": status, "summary": summary}
-            return truncate_json_response(
-                _json(payload), ""
-            )
+            return truncate_json_response(_json(payload), "")
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("market status", region, e)
@@ -1943,6 +2473,7 @@ def _date(value: Any) -> Any:
         "openWorldHint": True,
     },
 )
+@structured(EarningsOut)
 def get_earnings(
     ticker: Annotated[
         str,
@@ -1982,6 +2513,8 @@ def get_earnings(
             cal = {}
         try:
             dates = t.get_earnings_dates(limit=limit)
+            if dates is not None:
+                dates = dates.head(limit)  # yfinance returns at least 25 rows whatever the limit
         except Exception:
             dates = None
 
@@ -2007,7 +2540,7 @@ def get_earnings(
         reported = [h for h in history if _num(h["surprisePercent"]) != "-"]
         beats = sum(1 for h in reported if h["surprisePercent"] > 0)
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Earnings: {ticker}\n\n"
             if next_date:
                 result += f"- **Next earnings:** {_date(next_date)}"
@@ -2037,7 +2570,8 @@ def get_earnings(
                         f"{_num(h['surprisePercent'], '+.2f', '%')} |\n"
                     )
             return truncate_response(result, "")
-        else:
+
+        def _js():
             payload = {
                 "ticker": ticker,
                 "nextEarningsDate": _date(next_date) if next_date else None,
@@ -2060,6 +2594,8 @@ def get_earnings(
             }
             return truncate_json_response(_json(payload), "Lower the limit.")
 
+        return _respond(response_format, _md, _js)
+
     except Exception as e:
         return _error("earnings", ticker, e)
 
@@ -2075,6 +2611,7 @@ def get_earnings(
         "openWorldHint": True,
     },
 )
+@structured(EarningsCalendarOut)
 def get_earnings_calendar(
     start_date: Annotated[
         str | None,
@@ -2146,7 +2683,7 @@ def get_earnings_calendar(
                 }
             )
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Earnings Calendar: {start} to {end}\n\n"
             result += f"{len(rows)} companies, largest first.\n\n"
             result += (
@@ -2162,7 +2699,8 @@ def get_earnings_calendar(
             return truncate_response(
                 result, "Lower the limit or narrow the date range."
             )
-        else:
+
+        def _js():
             payload = {
                 "start": str(start),
                 "end": str(end),
@@ -2172,6 +2710,8 @@ def get_earnings_calendar(
             return truncate_json_response(
                 _json(payload), "Lower the limit or narrow the date range."
             )
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("earnings calendar", start_date or "today", e)
@@ -2188,6 +2728,7 @@ def get_earnings_calendar(
         "openWorldHint": True,
     },
 )
+@structured(ScreenOut)
 def screen_stocks(
     screener: Annotated[
         Screener,
@@ -2248,7 +2789,7 @@ def screen_stocks(
                 }
             )
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Screener: {res.get('title') or screener.value}\n\n"
             if res.get("description"):
                 result += f"{res['description']}\n\n"
@@ -2267,7 +2808,8 @@ def screen_stocks(
                     f"{_num(r['fiftyTwoWeekLow'])} - {_num(r['fiftyTwoWeekHigh'])} |\n"
                 )
             return truncate_response(result, "Lower the count.")
-        else:
+
+        def _js():
             payload = {
                 "screener": screener.value,
                 "title": res.get("title"),
@@ -2276,6 +2818,8 @@ def screen_stocks(
                 "results": rows,
             }
             return truncate_json_response(_json(payload), "Lower the count.")
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("screener results", screener.value, e)
@@ -2292,6 +2836,7 @@ def screen_stocks(
         "openWorldHint": True,
     },
 )
+@structured(FundOut)
 def get_fund_data(
     ticker: Annotated[
         str,
@@ -2353,7 +2898,7 @@ def get_fund_data(
                     }
                 )
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# Fund Data: {ticker}\n\n"
             if overview:
                 result += f"- **Category:** {overview.get('categoryName', 'N/A')}\n"
@@ -2392,7 +2937,8 @@ def get_fund_data(
                     if v:
                         result += f"- **{k.replace('Position', '').title()}:** {v * 100:.1f}%\n"
             return truncate_response(result, "")
-        else:
+
+        def _js():
             payload = {
                 "ticker": ticker,
                 "overview": overview,
@@ -2403,6 +2949,8 @@ def get_fund_data(
                 "assetClasses": assets,
             }
             return truncate_json_response(_json(payload), "")
+
+        return _respond(response_format, _md, _js)
 
     except Exception as e:
         return _error("fund data", ticker, e)
@@ -2419,6 +2967,7 @@ def get_fund_data(
         "openWorldHint": True,
     },
 )
+@structured(SectorOut)
 def get_sector_overview(
     sector: Annotated[
         SectorKey,
@@ -2494,7 +3043,7 @@ def get_sector_overview(
         if not overview and not any(lists.values()):
             return f"No data available for {label}."
 
-        if response_format == ResponseFormat.MARKDOWN:
+        def _md():
             result = f"# {'Industry' if industry else 'Sector'}: {label}\n\n"
             if overview.get("description"):
                 result += f"{overview['description']}\n\n"
@@ -2527,7 +3076,8 @@ def get_sector_overview(
                     ]
                     result += "| " + " | ".join(cells) + " |\n"
             return truncate_response(result, "Lower the limit.")
-        else:
+
+        def _js():
             payload = {
                 "sector": sector.value,
                 "industry": industry,
@@ -2537,8 +3087,15 @@ def get_sector_overview(
             }
             return truncate_json_response(_json(payload), "Lower the limit.")
 
+        return _respond(response_format, _md, _js)
+
     except Exception as e:
         return _error("sector overview", industry or sector.value, e)
+
+
+_publish_output_schemas()
+
+
 # ============================================================================
 # RUN SERVER
 # ============================================================================

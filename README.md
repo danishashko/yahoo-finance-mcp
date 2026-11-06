@@ -133,12 +133,14 @@ arriving under an unlisted name gets `421 Misdirected Request`.
 
 Every tool also accepts `response_format` (`"markdown"`, the default, or `"json"`).
 
+Every result also carries the data as MCP **structured content**, described by the tool's published `outputSchema`, whichever text format you ask for. Clients that support structured output read typed fields directly; others read the text. Missing figures are `null`, and a failed call returns `isError: true` with a message saying what to change.
+
 **`get_historical_prices` options:**
 
 - `period`: `1d`, `5d`, `1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `10y`, `ytd`, `max`
 - `interval`: `1m`, `2m`, `5m`, `15m`, `30m`, `60m`, `90m`, `1h`, `1d`, `5d`, `1wk`, `1mo`, `3mo`
 
-**`get_options_chain`:** call without `expiration_date` to list available dates, then again with a date. `option_type` is `calls`, `puts`, or `both`.
+**`get_options_chain`:** call without `expiration_date` to list available dates, then again with a date. `option_type` is `calls`, `puts`, or `both`. A chain returns the strikes nearest the current price.
 
 **`get_holders`:** `holder_type` is `institutional`, `mutualfund`, `major`, `insider_transactions`, `insider_purchases` (6-month net insider buying), or `insider_roster`.
 

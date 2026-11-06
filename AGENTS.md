@@ -10,10 +10,11 @@ Rules for an agent changing this repo. For what the server does, read `llms.txt`
 
 ## Invariants
 
-- Tools are plain sync `def`s with `@mcp.tool(structured_output=False, ...)`. SDK v2 runs a sync tool on a worker thread, so one slow call does not stall other HTTP clients. Never make a tool `async def` without awaiting real async I/O: an async tool runs on the event loop.
+- Tools are plain sync `def`s decorated `@mcp.tool(structured_output=False, ...)` then `@structured(<Model>Out)`. SDK v2 runs a sync tool on a worker thread, so one slow call does not stall other HTTP clients. Never make a tool `async def` without awaiting real async I/O: an async tool runs on the event loop.
 - Every tool carries `annotations` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) and a `response_format` parameter.
-- JSON output goes through `_json()`, never `json.dumps` directly. yfinance returns NaN for missing figures and bare NaN is invalid JSON.
-- Oversized output goes through `truncate_response` (markdown) or `truncate_json_response` / `_fit_records` (JSON). Never return more than `CHARACTER_LIMIT`.
+- Each tool builds its text in `_md()` and its JSON in `_js()` and returns `_respond(response_format, _md, _js)`. `_js()` always runs: its payload is the structured content, so it must match the tool's `<Model>Out` in the STRUCTURED OUTPUT section. A new field goes in both. `_publish_output_schemas()` publishes the schemas; they are not enforced at call time, so the release check enforces them.
+- JSON output goes through `_json()`, never `json.dumps` directly. yfinance returns NaN for missing figures and bare NaN is invalid JSON; `_json()` also turns the Markdown placeholder "N/A" into null.
+- Oversized output goes through `truncate_response` (markdown) or `truncate_json_response` / `_fit_records` (JSON). Never return more than `CHARACTER_LIMIT`. Prefer trimming to the useful rows (`_fit_records`, the options chain's nearest strikes) over `truncate_json_response`, which fails a JSON request.
 - Failures raise `ToolError` (via `_error()`, which also recognises Yahoo rate-limiting), so the client gets `isError: true`. Never return an error as plain text. "No data for this symbol" is a normal answer, not an error.
 - A tool that reads `.info` calls `_require_known()`: yfinance does not raise for an unknown symbol, it returns empty fields.
 - `_norm_ticker()` rewrites class shares (BRK.B, BRK/B) to Yahoo's BRK-B. Every ticker argument goes through it.
@@ -24,7 +25,7 @@ Rules for an agent changing this repo. For what the server does, read `llms.txt`
 ## Checks before a release
 
 1. `ruff check yahoo_finance_mcp.py`
-2. Call every tool in both `markdown` and `json` against live Yahoo data, including one symbol that has no data for that tool (an ETF for `get_earnings`, a stock for `get_fund_data`). Every JSON reply must parse.
+2. Call every tool in both `markdown` and `json` against live Yahoo data through an MCP client, including one symbol that has no data for that tool (an ETF for `get_earnings`, a stock for `get_fund_data`). Every JSON reply must parse, and every `structuredContent` must validate against the tool's `outputSchema` with a JSON Schema validator (`jsonschema`).
 3. If a tool was added, update the README tool table, `llms.txt`, the server `instructions` string, and the tool count in the README.
 
 ## Releasing

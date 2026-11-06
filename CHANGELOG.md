@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-11-06
+
+### Added
+
+- Structured output. Every tool publishes an `outputSchema`, and every result
+  carries its data as `structuredContent` next to the text, whichever
+  `response_format` was asked for. Clients that read structured content get
+  typed fields; others read the text as before. Checked on 36 live calls
+  across all 18 tools: every result validates against its schema, and the
+  Markdown text is unchanged apart from the options chain below.
+
+### Changed
+
+- JSON says missing with `null` instead of the string "N/A".
+- `get_options_chain` returns the strikes nearest the current price, with the
+  underlying price. It used to return the first 40 rows, the deep
+  in-the-money strikes, and a full chain in JSON was over the size limit.
+- `get_market_status` takes the markets yfinance accepts: US, GB, ASIA,
+  EUROPE, RATES, COMMODITIES, CURRENCIES, CRYPTOCURRENCIES. The codes it
+  listed before (JP, DE, CA and others) all failed.
+
+### Fixed
+
+- A JSON payload over the size limit came back as a successful
+  `{"error": "response_too_large"}` object. It is now an error result, and the
+  two tools that hit it keep the useful rows instead: `get_holders` with
+  `insider_transactions` returns the newest trades that fit (newest first),
+  and `get_options_chain` the strikes nearest the money.
+- `get_earnings` ignored `limit`: yfinance returns at least 25 dates whatever
+  it is asked for, so the history and the beat count always covered 25.
+
 ## [1.5.1] - 2026-11-06
 
 ### Fixed
