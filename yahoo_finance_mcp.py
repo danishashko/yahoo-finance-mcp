@@ -5,32 +5,35 @@ Yahoo Finance MCP Server
 This MCP server provides tools to access financial market data from Yahoo Finance,
 including stock prices, company information, financial statements, and market analysis.
 
-Built with FastMCP and yfinance.
+Built with the MCP Python SDK (MCPServer) and yfinance.
 """
 
 import argparse
-import functools
 import json
 import logging
 import math
+import re
 from enum import Enum
 from typing import Annotated, Any, Dict, List
 
 import yfinance as yf
 import pandas as pd
-import anyio
 from pydantic import Field
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 # Keep yfinance from emitting warnings/progress that could clutter the
 # stderr stream of an MCP stdio server. The JSON-RPC channel is stdout only.
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
+__version__ = "1.5.0"
+
 # Initialize the MCP server
-mcp = FastMCP(
+mcp = MCPServer(
     "yahoo_finance_mcp",
+    version=__version__,
     instructions=(
         "Read-only Yahoo Finance market data: no account, no API key, nothing is written. "
         "Start with search_symbols when you have a company name but no ticker. "
@@ -44,10 +47,6 @@ mcp = FastMCP(
         "minutes and Yahoo rate-limits bursts: space out large batches. Not investment advice."
     ),
 )
-
-# Report this server's own version in serverInfo, not the MCP SDK's.
-__version__ = "1.4.0"
-mcp._mcp_server.version = __version__
 
 # Constants
 CHARACTER_LIMIT = 25000  # Maximum response size in characters
@@ -163,16 +162,55 @@ class HolderType(str, Enum):
 # ============================================================================
 
 
+_CLASS_SHARE = re.compile(r"^([A-Z]{1,5})[./]([A-C])$")
+
+
 def _norm_ticker(value: str) -> str:
-    """Normalize a single ticker symbol."""
-    return value.strip().upper()
+    """Normalize a ticker to Yahoo's spelling.
 
-
-def _error(what: str, ticker: str, exc: Exception) -> str:
-    """Build a consistent, helpful error message for a failed tool call.
-
-    Detects Yahoo rate-limiting and gives specific guidance for it.
+    Class shares are written BRK.B or BRK/B almost everywhere else, but Yahoo
+    spells them BRK-B and answers BRK.B with an empty quote. Only a single
+    A-C letter after the separator is rewritten: Yahoo's own exchange suffixes
+    (BP.L, 7203.T, SAP.DE) never use those letters, so they pass through.
     """
+    value = value.strip().upper()
+    return _CLASS_SHARE.sub(r"\1-\2", value)
+
+
+def _unknown_symbol(ticker: str) -> ToolError:
+    return ToolError(
+        f"Unknown symbol '{ticker}'. Yahoo Finance has no quote for it. Use search_symbols "
+        "to find the right ticker; non-US listings need an exchange suffix (e.g. 7203.T, BP.L)."
+    )
+
+
+def _require_known(info: Dict[str, Any], ticker: str) -> None:
+    """Refuse a symbol Yahoo does not know instead of answering with N/A fields.
+
+    yfinance does not raise for an unknown symbol: `.info` comes back as a
+    near-empty dict and every field renders as N/A, so the call used to succeed
+    with nothing in it and an agent had no signal that the ticker was wrong.
+    """
+    has_name = info.get("shortName") or info.get("longName")
+    has_price = info.get("regularMarketPrice") is not None or info.get("currentPrice") is not None
+    if not has_name and not has_price:
+        raise _unknown_symbol(ticker)
+
+
+def _error(what: str, ticker: str, exc: Exception) -> ToolError:
+    """Turn a failure into a ToolError, so the client gets is_error=True.
+
+    Returned errors used to be ordinary text, indistinguishable from a real
+    answer unless the caller read the wording. Raising ToolError marks the
+    result as an error and still carries the message. Detects Yahoo
+    rate-limiting and gives specific guidance for it.
+    """
+    if isinstance(exc, ToolError):
+        raise exc
+    raise ToolError(_error_text(what, ticker, exc)) from exc
+
+
+def _error_text(what: str, ticker: str, exc: Exception) -> str:
     name = type(exc).__name__
     if "RateLimit" in name or "Too Many Requests" in str(exc):
         return (
@@ -188,16 +226,44 @@ def _error(what: str, ticker: str, exc: Exception) -> str:
     return msg
 
 
+def _iso_time(info: Dict[str, Any]) -> Any:
+    """The quote's regularMarketTime as ISO 8601 in the exchange's timezone."""
+    ts = info.get("regularMarketTime")
+    if not isinstance(ts, (int, float)):
+        return None
+    t = pd.Timestamp(ts, unit="s", tz="UTC")
+    tz = info.get("exchangeTimezoneName")
+    if tz:
+        try:
+            t = t.tz_convert(tz)
+        except Exception:
+            pass
+    return t.isoformat()
+
+
+def _market_line(info: Dict[str, Any]) -> str:
+    """'Tokyo, JPY, market CLOSED, as of 2026-11-06T15:30:00+09:00'."""
+    parts = [
+        info.get("fullExchangeName") or info.get("exchange"),
+        info.get("currency"),
+        f"market {info['marketState']}" if info.get("marketState") else None,
+        f"as of {_iso_time(info)}" if _iso_time(info) else None,
+    ]
+    return ", ".join(x for x in parts if x) or "N/A"
+
+
 def safe_get(data: Dict[str, Any], key: str, default: Any = "N/A") -> Any:
     """Safely get a value from a dictionary."""
     return data.get(key, default)
 
 
-def format_currency(value: Any) -> str:
-    """Format a value as currency."""
+def format_currency(value: Any, currency: str = "USD") -> str:
+    """Format a value as currency: $ for USD, otherwise the ISO code after it."""
     if value is None or value == "N/A":
         return "N/A"
     try:
+        if currency and currency != "USD":
+            return f"{value:,.2f} {currency}"
         return f"${value:,.2f}"
     except (ValueError, TypeError):
         return str(value)
@@ -384,32 +450,8 @@ def truncate_json_response(payload: str, message: str = "") -> str:
 # ============================================================================
 
 
-def offload(fn):
-    """Run a blocking tool body in a worker thread.
-
-    Every tool here is blocking I/O against Yahoo Finance declared `async def` with no
-    await in it, and the MCP SDK calls an async tool straight on the event loop.
-    Over stdio that is invisible - one request is in flight at a time - but over
-    Streamable HTTP it means one slow call stalls every other client. Measured
-    2026-09-08: eight concurrent series requests all finished together at 10.3
-    seconds instead of 1.1, and behind two n8n lanes the node spent 83 seconds
-    and timed six of its eight calls out.
-
-    `anyio.to_thread` is what the SDK itself uses for sync handlers. It keeps the
-    loop free to accept the next request and to answer the transport's own
-    keep-alive pings, which is why the wrapper is here rather than the tools
-    being rewritten as sync functions - this SDK calls a sync tool on the loop
-    too.
-    """
-
-    @functools.wraps(fn)
-    async def run(*args, **kwargs):
-        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
-
-    return run
-
-
 @mcp.tool(
+    structured_output=False,
     name="get_stock_quote",
     annotations={
         "title": "Get Current Stock Quote",
@@ -419,7 +461,6 @@ def offload(fn):
         "openWorldHint": True,
     },
 )
-@offload
 def get_stock_quote(
     ticker: Annotated[
         str,
@@ -446,6 +487,8 @@ def get_stock_quote(
     try:
         ticker_obj = make_ticker(ticker)
         info = ticker_obj.info
+        _require_known(info, ticker)
+        cur = info.get("currency") or "USD"
 
         # Get fast info for real-time data
         try:
@@ -472,17 +515,18 @@ def get_stock_quote(
 
         if response_format == ResponseFormat.MARKDOWN:
             result = f"# {safe_get(info, 'longName', ticker)} ({ticker})\n\n"
-            result += f"**Current Price:** {format_currency(current_price)}\n"
+            result += f"**Current Price:** {format_currency(current_price, cur)}\n"
+            result += f"**Market:** {_market_line(info)}\n"
 
             if change != "N/A":
                 change_symbol = "🔺" if change >= 0 else "🔻"
-                result += f"**Change:** {change_symbol} {format_currency(change)} ({change_pct:.2f}%)\n"
+                result += f"**Change:** {change_symbol} {format_currency(change, cur)} ({change_pct:.2f}%)\n"
 
             result += "\n## Market Data\n"
-            result += f"- **Previous Close:** {format_currency(previous_close)}\n"
-            result += f"- **Open:** {format_currency(safe_get(info, 'open'))}\n"
-            result += f"- **Day's Range:** {format_currency(safe_get(info, 'dayLow'))} - {format_currency(safe_get(info, 'dayHigh'))}\n"
-            result += f"- **52 Week Range:** {format_currency(safe_get(info, 'fiftyTwoWeekLow'))} - {format_currency(safe_get(info, 'fiftyTwoWeekHigh'))}\n"
+            result += f"- **Previous Close:** {format_currency(previous_close, cur)}\n"
+            result += f"- **Open:** {format_currency(safe_get(info, 'open'), cur)}\n"
+            result += f"- **Day's Range:** {format_currency(safe_get(info, 'dayLow'), cur)} - {format_currency(safe_get(info, 'dayHigh'), cur)}\n"
+            result += f"- **52 Week Range:** {format_currency(safe_get(info, 'fiftyTwoWeekLow'), cur)} - {format_currency(safe_get(info, 'fiftyTwoWeekHigh'), cur)}\n"
             result += (
                 f"- **Volume:** {safe_get(info, 'volume'):,}\n"
                 if safe_get(info, "volume") != "N/A"
@@ -496,7 +540,7 @@ def get_stock_quote(
             result += f"- **Market Cap:** {format_large_number(safe_get(info, 'marketCap'))}\n"
             result += f"- **Beta:** {safe_get(info, 'beta')}\n"
             result += f"- **PE Ratio:** {safe_get(info, 'trailingPE')}\n"
-            result += f"- **EPS:** {format_currency(safe_get(info, 'trailingEps'))}\n"
+            result += f"- **EPS:** {format_currency(safe_get(info, 'trailingEps'), cur)}\n"
             result += f"- **Dividend Yield:** {format_dividend_yield(safe_get(info, 'dividendYield'))}\n"
 
             result += "\n## Company Info\n"
@@ -511,6 +555,11 @@ def get_stock_quote(
             result = {
                 "ticker": ticker,
                 "longName": safe_get(info, "longName"),
+                "currency": info.get("currency"),
+                "exchange": info.get("fullExchangeName") or info.get("exchange"),
+                "marketState": info.get("marketState"),
+                "regularMarketTime": _iso_time(info),
+                "quoteType": info.get("quoteType"),
                 "currentPrice": current_price,
                 "previousClose": previous_close,
                 "change": change,
@@ -534,15 +583,11 @@ def get_stock_quote(
             return _json(result)
 
     except Exception as e:
-        error_msg = f"Error fetching quote for {ticker}: {str(e)}\n\n"
-        error_msg += "**Troubleshooting:**\n"
-        error_msg += "- Verify the ticker symbol is correct\n"
-        error_msg += "- Check if the market is open (some data may be delayed)\n"
-        error_msg += "- Try again in a moment if it's a temporary issue"
-        return error_msg
+        return _error("quote", ticker, e)
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_historical_prices",
     annotations={
         "title": "Get Historical Stock Prices",
@@ -552,7 +597,6 @@ def get_stock_quote(
         "openWorldHint": True,
     },
 )
-@offload
 def get_historical_prices(
     ticker: Annotated[
         str,
@@ -643,15 +687,11 @@ def get_historical_prices(
             )
 
     except Exception as e:
-        error_msg = f"Error fetching historical prices for {ticker}: {str(e)}\n\n"
-        error_msg += "**Troubleshooting:**\n"
-        error_msg += "- Verify ticker symbol is correct\n"
-        error_msg += "- Some intervals may not be available for all periods\n"
-        error_msg += "- Try a different period/interval combination"
-        return error_msg
+        return _error("historical prices", ticker, e)
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_company_info",
     annotations={
         "title": "Get Detailed Company Information",
@@ -661,7 +701,6 @@ def get_historical_prices(
         "openWorldHint": True,
     },
 )
-@offload
 def get_company_info(
     ticker: Annotated[
         str,
@@ -688,6 +727,8 @@ def get_company_info(
     try:
         ticker_obj = make_ticker(ticker)
         info = ticker_obj.info
+        _require_known(info, ticker)
+        cur = info.get("currency") or "USD"
 
         if response_format == ResponseFormat.MARKDOWN:
             result = f"# {safe_get(info, 'longName', ticker)} ({ticker})\n\n"
@@ -730,16 +771,16 @@ def get_company_info(
             result += f"- **PEG Ratio:** {safe_get(info, 'trailingPegRatio')}\n"
             result += f"- **Price to Book:** {safe_get(info, 'priceToBook')}\n"
             result += f"- **Price to Sales:** {safe_get(info, 'priceToSalesTrailing12Months')}\n"
-            result += f"- **EPS (Trailing):** {format_currency(safe_get(info, 'trailingEps'))}\n"
-            result += f"- **EPS (Forward):** {format_currency(safe_get(info, 'forwardEps'))}\n"
-            result += f"- **Dividend Rate:** {format_currency(safe_get(info, 'dividendRate'))}\n"
+            result += f"- **EPS (Trailing):** {format_currency(safe_get(info, 'trailingEps'), cur)}\n"
+            result += f"- **EPS (Forward):** {format_currency(safe_get(info, 'forwardEps'), cur)}\n"
+            result += f"- **Dividend Rate:** {format_currency(safe_get(info, 'dividendRate'), cur)}\n"
             result += f"- **Dividend Yield:** {format_dividend_yield(safe_get(info, 'dividendYield'))}\n"
             result += f"- **Ex-Dividend Date:** {safe_get(info, 'exDividendDate')}\n"
             result += f"- **Beta:** {safe_get(info, 'beta')}\n"
-            result += f"- **52 Week High:** {format_currency(safe_get(info, 'fiftyTwoWeekHigh'))}\n"
-            result += f"- **52 Week Low:** {format_currency(safe_get(info, 'fiftyTwoWeekLow'))}\n"
-            result += f"- **50 Day Avg:** {format_currency(safe_get(info, 'fiftyDayAverage'))}\n"
-            result += f"- **200 Day Avg:** {format_currency(safe_get(info, 'twoHundredDayAverage'))}\n"
+            result += f"- **52 Week High:** {format_currency(safe_get(info, 'fiftyTwoWeekHigh'), cur)}\n"
+            result += f"- **52 Week Low:** {format_currency(safe_get(info, 'fiftyTwoWeekLow'), cur)}\n"
+            result += f"- **50 Day Avg:** {format_currency(safe_get(info, 'fiftyDayAverage'), cur)}\n"
+            result += f"- **200 Day Avg:** {format_currency(safe_get(info, 'twoHundredDayAverage'), cur)}\n"
             result += (
                 f"- **Shares Outstanding:** {safe_get(info, 'sharesOutstanding'):,}\n"
                 if safe_get(info, "sharesOutstanding") != "N/A"
@@ -753,7 +794,7 @@ def get_company_info(
 
             result += "\n## Financial Highlights\n\n"
             result += f"- **Revenue:** {format_large_number(safe_get(info, 'totalRevenue'))}\n"
-            result += f"- **Revenue Per Share:** {format_currency(safe_get(info, 'revenuePerShare'))}\n"
+            result += f"- **Revenue Per Share:** {format_currency(safe_get(info, 'revenuePerShare'), cur)}\n"
             result += f"- **Profit Margin:** {format_percentage(safe_get(info, 'profitMargins'))}\n"
             result += f"- **Operating Margin:** {format_percentage(safe_get(info, 'operatingMargins'))}\n"
             result += f"- **ROA (Return on Assets):** {format_percentage(safe_get(info, 'returnOnAssets'))}\n"
@@ -772,14 +813,11 @@ def get_company_info(
             )
 
     except Exception as e:
-        error_msg = f"Error fetching company info for {ticker}: {str(e)}\n\n"
-        error_msg += "**Troubleshooting:**\n"
-        error_msg += "- Verify ticker symbol is correct\n"
-        error_msg += "- Some data may not be available for all companies"
-        return error_msg
+        return _error("company info", ticker, e)
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_financial_statements",
     annotations={
         "title": "Get Company Financial Statements",
@@ -789,7 +827,6 @@ def get_company_info(
         "openWorldHint": True,
     },
 )
-@offload
 def get_financial_statements(
     ticker: Annotated[
         str,
@@ -862,15 +899,11 @@ def get_financial_statements(
             )
 
     except Exception as e:
-        error_msg = f"Error fetching financial statements for {ticker}: {str(e)}\n\n"
-        error_msg += "**Troubleshooting:**\n"
-        error_msg += "- Verify ticker symbol is correct\n"
-        error_msg += "- Financial statements may not be available for all companies\n"
-        error_msg += "- Try get_company_info for basic financial metrics"
-        return error_msg
+        return _error("financial statements", ticker, e)
 
 
 @mcp.tool(
+    structured_output=False,
     name="compare_stocks",
     annotations={
         "title": "Compare Multiple Stocks",
@@ -880,7 +913,6 @@ def get_financial_statements(
         "openWorldHint": True,
     },
 )
-@offload
 def compare_stocks(
     tickers: Annotated[
         List[str],
@@ -911,10 +943,12 @@ def compare_stocks(
             try:
                 ticker_obj = make_ticker(ticker)
                 info = ticker_obj.info
+                _require_known(info, ticker)
 
                 data = {
                     "Ticker": ticker,
                     "Name": safe_get(info, "longName", ticker),
+                    "Currency": info.get("currency"),
                     "Price": safe_get(info, "currentPrice"),
                     "Change%": safe_get(info, "regularMarketChangePercent"),
                     "MarketCap": safe_get(info, "marketCap"),
@@ -933,6 +967,12 @@ def compare_stocks(
             except Exception as e:
                 comparison_data.append({"Ticker": ticker, "Error": str(e)})
 
+        if all("Error" in d for d in comparison_data):
+            raise ToolError(
+                "None of the tickers could be fetched: "
+                + "; ".join(f"{d['Ticker']}: {d['Error']}" for d in comparison_data)
+            )
+
         if response_format == ResponseFormat.MARKDOWN:
             result = f"# Stock Comparison: {', '.join(tickers)}\n\n"
 
@@ -948,7 +988,8 @@ def compare_stocks(
                     return [(t, v) for t, v in items if isinstance(v, (int, float))]
 
                 prices = _numeric((d["Ticker"], d["Price"]) for d in valid_data)
-                if prices:
+                # Prices in different currencies do not compare.
+                if prices and len({d.get("Currency") for d in valid_data}) == 1:
                     highest = max(prices, key=lambda x: x[1])
                     result += f"- **Highest Price:** {highest[0]} at {format_currency(highest[1])}\n"
 
@@ -970,14 +1011,11 @@ def compare_stocks(
             return truncate_json_response(_json(result), "")
 
     except Exception as e:
-        error_msg = f"Error comparing stocks: {str(e)}\n\n"
-        error_msg += "**Troubleshooting:**\n"
-        error_msg += "- Verify all ticker symbols are correct\n"
-        error_msg += "- Some data may be missing for certain stocks"
-        return error_msg
+        return _error("comparison", ", ".join(tickers), e)
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_analyst_recommendations",
     annotations={
         "title": "Get Analyst Recommendations and Price Targets",
@@ -987,7 +1025,6 @@ def compare_stocks(
         "openWorldHint": True,
     },
 )
-@offload
 def get_analyst_recommendations(
     ticker: Annotated[
         str,
@@ -1014,6 +1051,8 @@ def get_analyst_recommendations(
     try:
         ticker_obj = make_ticker(ticker)
         info = ticker_obj.info
+        _require_known(info, ticker)
+        cur = info.get("currency") or "USD"
 
         # Recommendation trend: modern yfinance returns columns
         # [period, strongBuy, buy, hold, sell, strongSell] with a RangeIndex.
@@ -1032,11 +1071,11 @@ def get_analyst_recommendations(
             result = f"# Analyst Recommendations: {ticker}\n\n"
 
             result += "## Price Targets\n\n"
-            result += f"- **Target High:** {format_currency(safe_get(info, 'targetHighPrice'))}\n"
-            result += f"- **Target Mean:** {format_currency(safe_get(info, 'targetMeanPrice'))}\n"
-            result += f"- **Target Low:** {format_currency(safe_get(info, 'targetLowPrice'))}\n"
-            result += f"- **Target Median:** {format_currency(safe_get(info, 'targetMedianPrice'))}\n"
-            result += f"- **Current Price:** {format_currency(safe_get(info, 'currentPrice'))}\n\n"
+            result += f"- **Target High:** {format_currency(safe_get(info, 'targetHighPrice'), cur)}\n"
+            result += f"- **Target Mean:** {format_currency(safe_get(info, 'targetMeanPrice'), cur)}\n"
+            result += f"- **Target Low:** {format_currency(safe_get(info, 'targetLowPrice'), cur)}\n"
+            result += f"- **Target Median:** {format_currency(safe_get(info, 'targetMedianPrice'), cur)}\n"
+            result += f"- **Current Price:** {format_currency(safe_get(info, 'currentPrice'), cur)}\n\n"
 
             current = safe_get(info, "currentPrice")
             target = safe_get(info, "targetMeanPrice")
@@ -1120,14 +1159,11 @@ def get_analyst_recommendations(
             return truncate_json_response(_json(result), "")
 
     except Exception as e:
-        error_msg = f"Error fetching analyst recommendations for {ticker}: {str(e)}\n\n"
-        error_msg += "**Troubleshooting:**\n"
-        error_msg += "- Verify ticker symbol is correct\n"
-        error_msg += "- Analyst data may not be available for all stocks"
-        return error_msg
+        return _error("analyst recommendations", ticker, e)
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_market_news",
     annotations={
         "title": "Get Latest Financial News",
@@ -1137,7 +1173,6 @@ def get_analyst_recommendations(
         "openWorldHint": True,
     },
 )
-@offload
 def get_market_news(
     ticker: Annotated[
         str,
@@ -1166,7 +1201,22 @@ def get_market_news(
     """
     ticker = _norm_ticker(ticker)
     try:
-        articles = make_ticker(ticker).get_news(count=count) or []
+        # Yahoo's feed for a ticker mixes in market wraps and other companies'
+        # stories that merely mention it. Fetch extra, put the ones led by this
+        # ticker (first tag, or the symbol in the headline) ahead, and keep each
+        # article's tags so the caller can judge the rest.
+        articles = make_ticker(ticker).get_news(count=min(count * 2, 40)) or []
+
+        def tags(article: Dict[str, Any]) -> List[str]:
+            fin = (article.get("content", article) or {}).get("finance") or {}
+            return [x.get("symbol") for x in fin.get("stockTickers") or [] if x.get("symbol")]
+
+        def about(article: Dict[str, Any]) -> bool:
+            t = tags(article)
+            title = (article.get("content", article) or {}).get("title") or ""
+            return (bool(t) and t[0] == ticker) or re.search(rf"\b{re.escape(ticker)}\b", title) is not None
+
+        articles = sorted(articles, key=lambda a: not about(a))[:count]
 
         # Modern yfinance nests each article's fields under a "content" key.
         def field(article: Dict[str, Any]) -> Dict[str, Any]:
@@ -1198,7 +1248,8 @@ def get_market_news(
                 if len(summary) > 400:
                     summary = summary[:400].rstrip() + "..."
                 result += f"## {i}. {title}\n"
-                meta = " | ".join(x for x in [provider(c), date] if x and x != "N/A")
+                tagged = ", ".join(tags(article)[:6])
+                meta = " | ".join(x for x in [provider(c), date, f"tickers: {tagged}" if tagged else ""] if x and x != "N/A")
                 if meta:
                     result += f"*{meta}*\n\n"
                 if summary:
@@ -1218,6 +1269,8 @@ def get_market_news(
                         "pubDate": c.get("pubDate", c.get("displayTime")),
                         "summary": c.get("summary") or c.get("description"),
                         "url": link(c),
+                        "tickers": tags(article),
+                        "primarilyAbout": about(article),
                     }
                 )
             payload = {"ticker": ticker, "count": len(items), "news": items}
@@ -1230,6 +1283,7 @@ def get_market_news(
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_options_chain",
     annotations={
         "title": "Get Options Chain",
@@ -1239,7 +1293,6 @@ def get_market_news(
         "openWorldHint": True,
     },
 )
-@offload
 def get_options_chain(
     ticker: Annotated[
         str,
@@ -1295,8 +1348,8 @@ def get_options_chain(
             )
 
         if expiration_date not in expirations:
-            return (
-                f"'{expiration_date}' is not an available expiration for {ticker}.\n\n"
+            raise ToolError(
+                f"'{expiration_date}' is not an available expiration for {ticker}. "
                 f"Available dates: {', '.join(expirations)}"
             )
 
@@ -1335,6 +1388,7 @@ def get_options_chain(
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_holders",
     annotations={
         "title": "Get Stock Ownership and Insider Activity",
@@ -1344,7 +1398,6 @@ def get_options_chain(
         "openWorldHint": True,
     },
 )
-@offload
 def get_holders(
     ticker: Annotated[
         str,
@@ -1426,6 +1479,7 @@ def get_holders(
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_dividends_splits",
     annotations={
         "title": "Get Dividend and Stock Split History",
@@ -1435,7 +1489,6 @@ def get_holders(
         "openWorldHint": True,
     },
 )
-@offload
 def get_dividends_splits(
     ticker: Annotated[
         str,
@@ -1527,6 +1580,7 @@ def get_dividends_splits(
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_analyst_estimates",
     annotations={
         "title": "Get Forward Analyst Estimates",
@@ -1536,7 +1590,6 @@ def get_dividends_splits(
         "openWorldHint": True,
     },
 )
-@offload
 def get_analyst_estimates(
     ticker: Annotated[
         str,
@@ -1632,6 +1685,7 @@ def get_analyst_estimates(
 
 
 @mcp.tool(
+    structured_output=False,
     name="search_symbols",
     annotations={
         "title": "Search for Ticker Symbols",
@@ -1641,7 +1695,6 @@ def get_analyst_estimates(
         "openWorldHint": True,
     },
 )
-@offload
 def search_symbols(
     query: Annotated[
         str,
@@ -1718,6 +1771,7 @@ def search_symbols(
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_market_status",
     annotations={
         "title": "Get Market Status and Summary",
@@ -1727,7 +1781,6 @@ def search_symbols(
         "openWorldHint": True,
     },
 )
-@offload
 def get_market_status(
     region: Annotated[
         str,
@@ -1875,6 +1928,7 @@ def _date(value: Any) -> Any:
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_earnings",
     annotations={
         "title": "Get Earnings Dates and Surprises",
@@ -1884,7 +1938,6 @@ def _date(value: Any) -> Any:
         "openWorldHint": True,
     },
 )
-@offload
 def get_earnings(
     ticker: Annotated[
         str,
@@ -2007,6 +2060,7 @@ def get_earnings(
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_earnings_calendar",
     annotations={
         "title": "Get Market-Wide Earnings Calendar",
@@ -2016,7 +2070,6 @@ def get_earnings(
         "openWorldHint": True,
     },
 )
-@offload
 def get_earnings_calendar(
     start_date: Annotated[
         str | None,
@@ -2062,7 +2115,7 @@ def get_earnings_calendar(
             pd.Timestamp(end_date).date() if end_date else start + pd.Timedelta(days=7)
         )
         if end < start:
-            return "end_date must be on or after start_date."
+            raise ToolError("end_date must be on or after start_date.")
         session = _get_session()
         kw = {"session": session} if session is not None else {}
         cal = yf.Calendars(start=start, end=end, **kw)
@@ -2120,6 +2173,7 @@ def get_earnings_calendar(
 
 
 @mcp.tool(
+    structured_output=False,
     name="screen_stocks",
     annotations={
         "title": "Run a Yahoo Finance Stock Screener",
@@ -2129,7 +2183,6 @@ def get_earnings_calendar(
         "openWorldHint": True,
     },
 )
-@offload
 def screen_stocks(
     screener: Annotated[
         Screener,
@@ -2224,6 +2277,7 @@ def screen_stocks(
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_fund_data",
     annotations={
         "title": "Get ETF or Mutual Fund Data",
@@ -2233,7 +2287,6 @@ def screen_stocks(
         "openWorldHint": True,
     },
 )
-@offload
 def get_fund_data(
     ticker: Annotated[
         str,
@@ -2351,6 +2404,7 @@ def get_fund_data(
 
 
 @mcp.tool(
+    structured_output=False,
     name="get_sector_overview",
     annotations={
         "title": "Get Sector or Industry Overview",
@@ -2360,7 +2414,6 @@ def get_fund_data(
         "openWorldHint": True,
     },
 )
-@offload
 def get_sector_overview(
     sector: Annotated[
         SectorKey,
@@ -2413,7 +2466,7 @@ def get_sector_overview(
             )
             valid = list(sec.industries.index) if sec.industries is not None else []
             if valid and key not in valid:
-                return (
+                raise ToolError(
                     f"'{industry}' is not an industry in {sector.value}. Valid keys: "
                     + ", ".join(valid)
                 )
@@ -2544,23 +2597,14 @@ def main() -> None:
         mcp.run()
         return
 
-    # These are read at run time, so setting them on the module-level server
-    # after argument parsing is enough - no second FastMCP instance.
-    mcp.settings.host = args.host
-    mcp.settings.port = args.port
     # Every tool here is a single request/response against Yahoo Finance with
     # nothing carried between calls, so a session buys nothing and costs
     # compatibility: a client that forgets Mcp-Session-Id gets a 400 mid-run.
-    mcp.settings.stateless_http = not args.stateful
-
+    security = None
     if args.host not in ("127.0.0.1", "localhost", "::1"):
-        # FastMCP picks its DNS-rebinding allow-list inside its constructor,
-        # from the host it was constructed with - and this server is built at
-        # import time on the loopback default. So binding wider here would
-        # leave that allow-list rejecting the very clients the wider bind was
-        # for, with a bare "421 Misdirected Request" and no hint why. Rebuild
-        # the list around the host actually bound instead of switching the
-        # protection off.
+        # The SDK only builds a DNS-rebinding allow-list for a loopback bind.
+        # Binding wider without one would accept any Host header, so build it
+        # around the host actually bound instead of switching protection off.
         hosts = args.allowed_host or [
             f"127.0.0.1:{args.port}",
             f"localhost:{args.port}",
@@ -2568,13 +2612,19 @@ def main() -> None:
             # is how n8n and other dockerised clients arrive
             f"host.docker.internal:{args.port}",
         ]
-        mcp.settings.transport_security = TransportSecuritySettings(
+        security = TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=hosts,
             allowed_origins=[f"http://{h}" for h in hosts],
         )
 
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="streamable-http",
+        host=args.host,
+        port=args.port,
+        stateless_http=not args.stateful,
+        transport_security=security,
+    )
 
 
 if __name__ == "__main__":

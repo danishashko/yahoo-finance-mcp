@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-11-06
+
+### Changed
+
+- Moved to the MCP Python SDK v2 (`mcp>=2.3,<3`). `FastMCP` is now
+  `MCPServer`; the SDK runs each tool on a worker thread itself, so the
+  `@offload` wrapper is gone. Clients see no change in tool names or arguments.
+- Failures are now real MCP errors (`isError: true`) instead of ordinary text
+  an agent had to read to recognise: unknown symbols, an expiration date that
+  does not exist, an end date before the start date, an unknown industry key,
+  Yahoo rate-limiting, and upstream failures.
+- Tools no longer advertise an output schema that only wrapped the text in
+  `{"result": ...}`.
+
+### Fixed
+
+- An unknown ticker returned a full page of N/A fields as a successful call.
+  `get_stock_quote`, `get_company_info`, `get_analyst_recommendations` and
+  `compare_stocks` now answer "Unknown symbol", pointing to `search_symbols`.
+- `BRK.B` and `BRK/B` returned an empty quote: Yahoo spells class shares
+  `BRK-B`. They are rewritten; exchange suffixes such as `BP.L` and `7203.T`
+  pass through unchanged.
+- Prices in other currencies were printed with `$`. Quotes, company info and
+  analyst targets now use the listing's currency (`3,338.00 JPY`), and the
+  quote states its exchange, currency, market state and timestamp, in Markdown
+  and JSON. `compare_stocks` adds a currency column and no longer names a
+  "highest price" across different currencies.
+- `get_market_news` put stories about other companies first (an MP Materials
+  call for AAPL). Stories led by the ticker now come first, and each item
+  lists the tickers it is tagged with and whether it is primarily about the
+  requested one.
+
+### Known issue
+
+- curl_cffi 0.17, which yfinance 1.8 requires, stalls the first request on each
+  new thread: the first burst of parallel calls after the server starts takes
+  about 8 seconds for 8 quotes. Later bursts take under a second (measured over
+  HTTP: 7.7s, then 0.73s and 0.69s), because the server reuses its worker
+  threads. Single calls are unaffected.
+
 ## [1.4.0] - 2026-11-06
 
 ### Added

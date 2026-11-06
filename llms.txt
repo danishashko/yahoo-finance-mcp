@@ -36,4 +36,6 @@ Registry name: `io.github.danishashko/yahoo-finance-mcp`. npm package: `yahoo-fi
 - Data can be delayed about 15 minutes. Yahoo rate-limits bursts; a rate-limit reply says so, wait and retry.
 - Responses are capped at 25,000 characters. JSON replies that would exceed it say so instead of being cut mid-document.
 - Nothing is written anywhere. All tools are read-only and idempotent except `screen_stocks`, whose results move during the trading day.
+- A failed call (unknown symbol, bad date, rate limit) returns `isError: true` with a message saying what to change. An unknown symbol points you to `search_symbols`.
+- Class shares can be written BRK.B or BRK-B. Non-US listings need Yahoo's exchange suffix (7203.T, BP.L, SAP.DE). Quotes state their currency, exchange, market state and timestamp.
 - Not investment advice.
