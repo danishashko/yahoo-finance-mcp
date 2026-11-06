@@ -9,13 +9,16 @@ Built with FastMCP and yfinance.
 """
 
 import argparse
+import functools
 import json
 import logging
+import math
 from enum import Enum
 from typing import Annotated, Any, Dict, List
 
 import yfinance as yf
 import pandas as pd
+import anyio
 from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
@@ -245,6 +248,37 @@ def dataframe_to_markdown(df: pd.DataFrame, max_rows: int = 50) -> str:
         return "```\n" + df.to_string() + "\n```" + truncated_msg
 
 
+def _finite(value: Any) -> Any:
+    """Replace every non-finite float with None, recursively.
+
+    Python writes `NaN`, `Infinity` and `-Infinity` bare, and none of the three
+    is valid JSON - `JSON.parse` refuses the whole document. yfinance returns
+    NaN for any figure a source did not supply (`get_analyst_estimates` hits it
+    on the LTG growth row for most tickers), so without this a successful call
+    hands the client a payload it cannot read, with every HTTP status saying
+    the call worked. Serialising them as null loses nothing: the field was
+    missing either way.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(v) for v in value]
+    return value
+
+
+def _json(payload: Any) -> str:
+    """Serialise to strictly valid JSON, with non-finite floats as null.
+
+    `allow_nan=False` is the backstop: if a non-finite value ever arrives in a
+    type `_finite` does not walk, this raises inside the tool's own try/except
+    and the caller gets a readable error, rather than a green node holding
+    unparseable text.
+    """
+    return json.dumps(_finite(payload), indent=2, default=str, allow_nan=False)
+
+
 def _statement_to_dict(df: Any, max_rows: int = 30) -> Dict[str, Any]:
     """A financial statement keyed by period, with the periods as strings.
 
@@ -290,7 +324,7 @@ def _fit_records(records: List[Any], envelope: Dict[str, Any], key: str) -> str:
                 f"Newest {kept} of {len(records)} records. Narrow the period or "
                 "widen the interval for full coverage."
             )
-        payload = json.dumps(body, indent=2, default=str)
+        payload = _json(body)
         if len(payload) <= CHARACTER_LIMIT or kept == 0:
             return payload
         kept = kept * 3 // 4 if kept > 4 else kept - 1
@@ -330,6 +364,31 @@ def truncate_json_response(payload: str, message: str = "") -> str:
 # ============================================================================
 
 
+def offload(fn):
+    """Run a blocking tool body in a worker thread.
+
+    Every tool here is blocking I/O against Yahoo Finance declared `async def` with no
+    await in it, and the MCP SDK calls an async tool straight on the event loop.
+    Over stdio that is invisible - one request is in flight at a time - but over
+    Streamable HTTP it means one slow call stalls every other client. Measured
+    2026-09-08: eight concurrent series requests all finished together at 10.3
+    seconds instead of 1.1, and behind two n8n lanes the node spent 83 seconds
+    and timed six of its eight calls out.
+
+    `anyio.to_thread` is what the SDK itself uses for sync handlers. It keeps the
+    loop free to accept the next request and to answer the transport's own
+    keep-alive pings, which is why the wrapper is here rather than the tools
+    being rewritten as sync functions - this SDK calls a sync tool on the loop
+    too.
+    """
+
+    @functools.wraps(fn)
+    async def run(*args, **kwargs):
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+
+    return run
+
+
 @mcp.tool(
     name="get_stock_quote",
     annotations={
@@ -340,7 +399,8 @@ def truncate_json_response(payload: str, message: str = "") -> str:
         "openWorldHint": True,
     },
 )
-async def get_stock_quote(
+@offload
+def get_stock_quote(
     ticker: Annotated[
         str,
         Field(
@@ -451,7 +511,7 @@ async def get_stock_quote(
                 "industry": safe_get(info, "industry"),
                 "website": safe_get(info, "website"),
             }
-            return json.dumps(result, indent=2)
+            return _json(result)
 
     except Exception as e:
         error_msg = f"Error fetching quote for {ticker}: {str(e)}\n\n"
@@ -472,7 +532,8 @@ async def get_stock_quote(
         "openWorldHint": True,
     },
 )
-async def get_historical_prices(
+@offload
+def get_historical_prices(
     ticker: Annotated[
         str,
         Field(
@@ -580,7 +641,8 @@ async def get_historical_prices(
         "openWorldHint": True,
     },
 )
-async def get_company_info(
+@offload
+def get_company_info(
     ticker: Annotated[
         str,
         Field(
@@ -685,7 +747,7 @@ async def get_company_info(
             return truncate_response(result, "")
         else:
             return truncate_json_response(
-                json.dumps(info, indent=2, default=str),
+                _json(info),
                 "Use markdown format for a summarized view.",
             )
 
@@ -707,7 +769,8 @@ async def get_company_info(
         "openWorldHint": True,
     },
 )
-async def get_financial_statements(
+@offload
+def get_financial_statements(
     ticker: Annotated[
         str,
         Field(
@@ -774,7 +837,7 @@ async def get_financial_statements(
                 if v is not None and not v.empty
             }
             return truncate_json_response(
-                json.dumps(result, indent=2, default=str),
+                _json(result),
                 "Use markdown format for a summarized view.",
             )
 
@@ -797,7 +860,8 @@ async def get_financial_statements(
         "openWorldHint": True,
     },
 )
-async def compare_stocks(
+@offload
+def compare_stocks(
     tickers: Annotated[
         List[str],
         Field(
@@ -883,7 +947,7 @@ async def compare_stocks(
             return truncate_response(result, "")
         else:
             result = {"tickers": tickers, "comparison": comparison_data}
-            return truncate_json_response(json.dumps(result, indent=2, default=str), "")
+            return truncate_json_response(_json(result), "")
 
     except Exception as e:
         error_msg = f"Error comparing stocks: {str(e)}\n\n"
@@ -903,7 +967,8 @@ async def compare_stocks(
         "openWorldHint": True,
     },
 )
-async def get_analyst_recommendations(
+@offload
+def get_analyst_recommendations(
     ticker: Annotated[
         str,
         Field(
@@ -1032,7 +1097,7 @@ async def get_analyst_recommendations(
                 if upgrades is not None and not upgrades.empty
                 else [],
             }
-            return truncate_json_response(json.dumps(result, indent=2, default=str), "")
+            return truncate_json_response(_json(result), "")
 
     except Exception as e:
         error_msg = f"Error fetching analyst recommendations for {ticker}: {str(e)}\n\n"
@@ -1052,7 +1117,8 @@ async def get_analyst_recommendations(
         "openWorldHint": True,
     },
 )
-async def get_market_news(
+@offload
+def get_market_news(
     ticker: Annotated[
         str,
         Field(
@@ -1136,7 +1202,7 @@ async def get_market_news(
                 )
             payload = {"ticker": ticker, "count": len(items), "news": items}
             return truncate_json_response(
-                json.dumps(payload, indent=2, default=str), ""
+                _json(payload), ""
             )
 
     except Exception as e:
@@ -1153,7 +1219,8 @@ async def get_market_news(
         "openWorldHint": True,
     },
 )
-async def get_options_chain(
+@offload
+def get_options_chain(
     ticker: Annotated[
         str,
         Field(
@@ -1240,7 +1307,7 @@ async def get_options_chain(
             if want_puts:
                 payload["puts"] = chain.puts.to_dict(orient="records")
             return truncate_json_response(
-                json.dumps(payload, indent=2, default=str), ""
+                _json(payload), ""
             )
 
     except Exception as e:
@@ -1257,7 +1324,8 @@ async def get_options_chain(
         "openWorldHint": True,
     },
 )
-async def get_holders(
+@offload
+def get_holders(
     ticker: Annotated[
         str,
         Field(
@@ -1322,7 +1390,7 @@ async def get_holders(
                 "data": df.reset_index().to_dict(orient="records"),
             }
             return truncate_json_response(
-                json.dumps(payload, indent=2, default=str), ""
+                _json(payload), ""
             )
 
     except Exception as e:
@@ -1339,7 +1407,8 @@ async def get_holders(
         "openWorldHint": True,
     },
 )
-async def get_dividends_splits(
+@offload
+def get_dividends_splits(
     ticker: Annotated[
         str,
         Field(
@@ -1422,7 +1491,7 @@ async def get_dividends_splits(
                 else [],
             }
             return truncate_json_response(
-                json.dumps(payload, indent=2, default=str), ""
+                _json(payload), ""
             )
 
     except Exception as e:
@@ -1439,7 +1508,8 @@ async def get_dividends_splits(
         "openWorldHint": True,
     },
 )
-async def get_analyst_estimates(
+@offload
+def get_analyst_estimates(
     ticker: Annotated[
         str,
         Field(
@@ -1526,7 +1596,7 @@ async def get_analyst_estimates(
                 "growthEstimates": df_records(growth),
             }
             return truncate_json_response(
-                json.dumps(payload, indent=2, default=str), ""
+                _json(payload), ""
             )
 
     except Exception as e:
@@ -1543,7 +1613,8 @@ async def get_analyst_estimates(
         "openWorldHint": True,
     },
 )
-async def search_symbols(
+@offload
+def search_symbols(
     query: Annotated[
         str,
         Field(
@@ -1611,7 +1682,7 @@ async def search_symbols(
             ]
             payload = {"query": query, "count": len(items), "results": items}
             return truncate_json_response(
-                json.dumps(payload, indent=2, default=str), ""
+                _json(payload), ""
             )
 
     except Exception as e:
@@ -1628,7 +1699,8 @@ async def search_symbols(
         "openWorldHint": True,
     },
 )
-async def get_market_status(
+@offload
+def get_market_status(
     region: Annotated[
         str,
         Field(
@@ -1706,7 +1778,7 @@ async def get_market_status(
         else:
             payload = {"region": region, "status": status, "summary": summary}
             return truncate_json_response(
-                json.dumps(payload, indent=2, default=str), ""
+                _json(payload), ""
             )
 
     except Exception as e:

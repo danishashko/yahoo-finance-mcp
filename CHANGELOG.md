@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-09-08
+
+### Fixed
+
+- Non-finite numbers no longer make a successful response unparseable. Python
+  writes `NaN`, `Infinity` and `-Infinity` bare and none of the three is valid
+  JSON, so any figure yfinance did not supply took the whole document down at
+  the client's `JSON.parse` - `get_analyst_estimates` hit this on the LTG
+  growth row for most tickers, including AAPL. Every non-finite float now
+  serialises as `null`, which says exactly what was true: the value was
+  missing. The failure was silent, so the symptom was a green call whose
+  downstream fields all arrived empty.
+- Blocking tool bodies no longer stall the event loop. Every tool here is
+  blocking I/O declared `async def` with no await in it, and the MCP SDK calls
+  an async tool straight on the loop - invisible over stdio, where one request
+  is in flight at a time, and serious over HTTP, where one slow call stalls
+  every other client. Tool bodies now run through `anyio.to_thread`. Measured
+  2026-09-08: eight concurrent ticker requests went from all finishing together
+  at 10.3 seconds to all finishing at 1.2.
+
 ## [1.3.0] - 2026-09-04
 
 ### Added
