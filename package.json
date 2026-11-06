@@ -1,6 +1,6 @@
 {
   "name": "yahoo-finance-mcp-server",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "mcpName": "io.github.danishashko/yahoo-finance-mcp",
   "description": "Yahoo Finance MCP Server - Real-time stock data, company info, financial statements, and market analysis via Model Context Protocol",
   "main": "bin/cli.js",
@@ -46,6 +46,7 @@
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
-    "server.json"
+    "server.json",
+    "llms.txt"
   ]
 }

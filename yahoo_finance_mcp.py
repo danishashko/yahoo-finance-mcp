@@ -29,7 +29,25 @@ from mcp.server.transport_security import TransportSecuritySettings
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # Initialize the MCP server
-mcp = FastMCP("yahoo_finance_mcp")
+mcp = FastMCP(
+    "yahoo_finance_mcp",
+    instructions=(
+        "Read-only Yahoo Finance market data: no account, no API key, nothing is written. "
+        "Start with search_symbols when you have a company name but no ticker. "
+        "Per stock: get_stock_quote (price), get_company_info (profile), get_financial_statements, "
+        "get_analyst_recommendations, get_analyst_estimates, get_earnings (next date, beat/miss history), "
+        "get_holders (institutions, insider trades, insider net buying), get_dividends_splits, "
+        "get_options_chain, get_market_news. Funds: get_fund_data. "
+        "Discovery: screen_stocks (movers, most active, undervalued), get_earnings_calendar (who reports when), "
+        "get_sector_overview (sector and industry leaders). Market-wide: get_market_status, compare_stocks. "
+        "Every tool takes response_format='json' for machine-readable output. Data can be delayed about 15 "
+        "minutes and Yahoo rate-limits bursts: space out large batches. Not investment advice."
+    ),
+)
+
+# Report this server's own version in serverInfo, not the MCP SDK's.
+__version__ = "1.4.0"
+mcp._mcp_server.version = __version__
 
 # Constants
 CHARACTER_LIMIT = 25000  # Maximum response size in characters
@@ -136,6 +154,8 @@ class HolderType(str, Enum):
     MUTUALFUND = "mutualfund"
     MAJOR = "major"
     INSIDER_TRANSACTIONS = "insider_transactions"
+    INSIDER_PURCHASES = "insider_purchases"
+    INSIDER_ROSTER = "insider_roster"
 
 
 # ============================================================================
@@ -1337,7 +1357,7 @@ def get_holders(
     holder_type: Annotated[
         HolderType,
         Field(
-            description="Type of ownership data: 'institutional', 'mutualfund', 'major', or 'insider_transactions'"
+            description="Type of ownership data: 'institutional', 'mutualfund', 'major', 'insider_transactions' (each trade), 'insider_purchases' (6-month net buying summary), or 'insider_roster' (insiders and their current stakes)"
         ),
     ] = HolderType.INSTITUTIONAL,
     response_format: Annotated[
@@ -1347,7 +1367,7 @@ def get_holders(
         ),
     ] = ResponseFormat.MARKDOWN,
 ) -> str:
-    """Ownership and insider activity for one stock, selected by holder_type: 'institutional' (top institutional holders), 'mutualfund' (top fund holders), 'major' (insider-vs-institutional ownership % breakdown), or 'insider_transactions' (recent insider buys and sells).
+    """Ownership and insider activity for one stock, selected by holder_type: 'institutional' (top institutional holders), 'mutualfund' (top fund holders), 'major' (insider-vs-institutional ownership % breakdown), 'insider_transactions' (recent insider buys and sells, one row per trade), 'insider_purchases' (net insider buying vs selling over the last 6 months), or 'insider_roster' (each insider, their position and shares held).
 
     Use for "who owns X", institutional ownership, or insider trading activity. One holder_type per call: call again to get a different view.
 
@@ -1369,6 +1389,14 @@ def get_holders(
             HolderType.INSIDER_TRANSACTIONS: (
                 "Insider Transactions",
                 lambda: t.insider_transactions,
+            ),
+            HolderType.INSIDER_PURCHASES: (
+                "Insider Net Buying (Last 6 Months)",
+                lambda: t.insider_purchases,
+            ),
+            HolderType.INSIDER_ROSTER: (
+                "Insider Roster",
+                lambda: t.insider_roster_holders,
             ),
         }
         title, getter = labels[holder_type]
@@ -1785,6 +1813,674 @@ def get_market_status(
         return _error("market status", region, e)
 
 
+class Screener(str, Enum):
+    """Yahoo's predefined screeners (the lists behind finance.yahoo.com/screener)."""
+
+    DAY_GAINERS = "day_gainers"
+    DAY_LOSERS = "day_losers"
+    MOST_ACTIVES = "most_actives"
+    MOST_SHORTED_STOCKS = "most_shorted_stocks"
+    SMALL_CAP_GAINERS = "small_cap_gainers"
+    AGGRESSIVE_SMALL_CAPS = "aggressive_small_caps"
+    GROWTH_TECHNOLOGY_STOCKS = "growth_technology_stocks"
+    UNDERVALUED_GROWTH_STOCKS = "undervalued_growth_stocks"
+    UNDERVALUED_LARGE_CAPS = "undervalued_large_caps"
+    TOP_ETFS_US = "top_etfs_us"
+    TOP_PERFORMING_ETFS = "top_performing_etfs"
+    TECHNOLOGY_ETFS = "technology_etfs"
+    BOND_ETFS = "bond_etfs"
+    TOP_MUTUAL_FUNDS = "top_mutual_funds"
+    SOLID_LARGE_GROWTH_FUNDS = "solid_large_growth_funds"
+    SOLID_MIDCAP_GROWTH_FUNDS = "solid_midcap_growth_funds"
+    CONSERVATIVE_FOREIGN_FUNDS = "conservative_foreign_funds"
+    HIGH_YIELD_BOND = "high_yield_bond"
+    PORTFOLIO_ANCHORS = "portfolio_anchors"
+
+
+class SectorKey(str, Enum):
+    """Yahoo Finance sector keys."""
+
+    BASIC_MATERIALS = "basic-materials"
+    COMMUNICATION_SERVICES = "communication-services"
+    CONSUMER_CYCLICAL = "consumer-cyclical"
+    CONSUMER_DEFENSIVE = "consumer-defensive"
+    ENERGY = "energy"
+    FINANCIAL_SERVICES = "financial-services"
+    HEALTHCARE = "healthcare"
+    INDUSTRIALS = "industrials"
+    REAL_ESTATE = "real-estate"
+    TECHNOLOGY = "technology"
+    UTILITIES = "utilities"
+
+
+def _num(value: Any, spec: str = ".2f", suffix: str = "") -> str:
+    """Format a finite number, or '-' for anything missing or non-finite."""
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return format(value, spec) + suffix
+    return "-"
+
+
+def _records(df: Any, limit: int) -> List[Dict[str, Any]]:
+    """A frame as a list of plain records with its index as a column, capped."""
+    if df is None or getattr(df, "empty", True):
+        return []
+    out = df.head(limit).reset_index()
+    out.columns = [str(c) for c in out.columns]
+    return out.to_dict(orient="records")
+
+
+def _date(value: Any) -> Any:
+    """ISO date string for a date/datetime/Timestamp, else the value unchanged."""
+    return value.strftime("%Y-%m-%d") if hasattr(value, "strftime") else value
+
+
+@mcp.tool(
+    name="get_earnings",
+    annotations={
+        "title": "Get Earnings Dates and Surprises",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+@offload
+def get_earnings(
+    ticker: Annotated[
+        str,
+        Field(
+            description="Stock ticker symbol (e.g., 'AAPL', 'MSFT', 'TSLA')",
+            min_length=1,
+            max_length=10,
+        ),
+    ],
+    limit: Annotated[
+        int,
+        Field(
+            description="How many earnings dates to return, upcoming and past (1-40)",
+            ge=1,
+            le=40,
+        ),
+    ] = 12,
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Next earnings date for one stock (with days until it, consensus EPS and revenue range) plus its earnings history: each past report's EPS estimate, reported EPS and surprise %. Also returns the next ex-dividend date.
+
+    Use before opening or holding a position through earnings, to check the earnings track record (beats vs misses), or for "when does X report". For forward EPS/revenue estimates by period use get_analyst_estimates; for every company reporting in a date range use get_earnings_calendar.
+
+    Returns Markdown by default, or JSON when response_format='json'. A symbol with no earnings (an ETF, an index) returns a short message.
+    """
+    ticker = _norm_ticker(ticker)
+    try:
+        t = make_ticker(ticker)
+        try:
+            cal = t.calendar or {}
+        except Exception:
+            cal = {}
+        try:
+            dates = t.get_earnings_dates(limit=limit)
+        except Exception:
+            dates = None
+
+        if not cal.get("Earnings Date") and (dates is None or dates.empty):
+            return f"No earnings data available for {ticker} (ETFs and indices do not report earnings)."
+
+        today = pd.Timestamp.now().date()
+        next_dates = cal.get("Earnings Date") or []
+        next_date = next_dates[0] if next_dates else None
+        days_until = (next_date - today).days if next_date else None
+
+        history = []
+        if dates is not None and not dates.empty:
+            for idx, row in dates.iterrows():
+                history.append(
+                    {
+                        "date": idx.strftime("%Y-%m-%d"),
+                        "epsEstimate": row.get("EPS Estimate"),
+                        "reportedEps": row.get("Reported EPS"),
+                        "surprisePercent": row.get("Surprise(%)"),
+                    }
+                )
+        reported = [h for h in history if _num(h["surprisePercent"]) != "-"]
+        beats = sum(1 for h in reported if h["surprisePercent"] > 0)
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# Earnings: {ticker}\n\n"
+            if next_date:
+                result += f"- **Next earnings:** {_date(next_date)}"
+                if len(next_dates) > 1:
+                    result += f" to {_date(next_dates[-1])} (window)"
+                result += f" ({days_until} days away)\n"
+            if cal.get("Earnings Average") is not None:
+                result += (
+                    f"- **EPS estimate:** {format_currency(cal.get('Earnings Average'))} "
+                    f"(range {format_currency(cal.get('Earnings Low'))} to {format_currency(cal.get('Earnings High'))})\n"
+                )
+            if cal.get("Revenue Average") is not None:
+                result += (
+                    f"- **Revenue estimate:** {format_large_number(cal.get('Revenue Average'))} "
+                    f"(range {format_large_number(cal.get('Revenue Low'))} to {format_large_number(cal.get('Revenue High'))})\n"
+                )
+            if cal.get("Ex-Dividend Date"):
+                result += f"- **Ex-dividend date:** {_date(cal['Ex-Dividend Date'])}\n"
+            if reported:
+                result += f"- **Track record:** beat the EPS estimate in {beats} of the last {len(reported)} reports\n"
+            if history:
+                result += "\n## Earnings History\n\n"
+                result += "| Date | EPS Estimate | Reported EPS | Surprise |\n|---|---|---|---|\n"
+                for h in history:
+                    result += (
+                        f"| {h['date']} | {_num(h['epsEstimate'])} | {_num(h['reportedEps'])} | "
+                        f"{_num(h['surprisePercent'], '+.2f', '%')} |\n"
+                    )
+            return truncate_response(result, "")
+        else:
+            payload = {
+                "ticker": ticker,
+                "nextEarningsDate": _date(next_date) if next_date else None,
+                "nextEarningsWindow": [_date(d) for d in next_dates],
+                "daysUntilEarnings": days_until,
+                "epsEstimate": {
+                    "average": cal.get("Earnings Average"),
+                    "low": cal.get("Earnings Low"),
+                    "high": cal.get("Earnings High"),
+                },
+                "revenueEstimate": {
+                    "average": cal.get("Revenue Average"),
+                    "low": cal.get("Revenue Low"),
+                    "high": cal.get("Revenue High"),
+                },
+                "exDividendDate": _date(cal.get("Ex-Dividend Date")),
+                "beats": beats,
+                "reportsWithSurprise": len(reported),
+                "history": history,
+            }
+            return truncate_json_response(_json(payload), "Lower the limit.")
+
+    except Exception as e:
+        return _error("earnings", ticker, e)
+
+
+@mcp.tool(
+    name="get_earnings_calendar",
+    annotations={
+        "title": "Get Market-Wide Earnings Calendar",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+@offload
+def get_earnings_calendar(
+    start_date: Annotated[
+        str | None,
+        Field(description="First day, YYYY-MM-DD. Defaults to today."),
+    ] = None,
+    end_date: Annotated[
+        str | None,
+        Field(description="Last day, YYYY-MM-DD. Defaults to 7 days after start_date."),
+    ] = None,
+    min_market_cap: Annotated[
+        float | None,
+        Field(
+            description="Only companies at or above this market cap in USD (e.g., 10000000000 for $10B)",
+            ge=0,
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        Field(
+            description="Maximum number of companies to return (1-100)", ge=1, le=100
+        ),
+    ] = 50,
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Every company reporting earnings in a date range, market-wide: symbol, company, market cap, event, date, timing (BMO before open / AMC after close), EPS estimate and, once reported, actual EPS and surprise %.
+
+    Use for "who reports this week", building a catalyst watchlist, or checking which holdings report soon. Not for one stock's history: use get_earnings for that. Results are sorted by market cap, largest first.
+
+    Returns Markdown by default, or JSON when response_format='json'. An empty range returns a short message.
+    """
+    try:
+        if not hasattr(yf, "Calendars"):
+            return "The earnings calendar needs yfinance 1.0 or newer. Run: pip install -U yfinance"
+        start = (
+            pd.Timestamp(start_date).date() if start_date else pd.Timestamp.now().date()
+        )
+        end = (
+            pd.Timestamp(end_date).date() if end_date else start + pd.Timedelta(days=7)
+        )
+        if end < start:
+            return "end_date must be on or after start_date."
+        session = _get_session()
+        kw = {"session": session} if session is not None else {}
+        cal = yf.Calendars(start=start, end=end, **kw)
+        df = cal.get_earnings_calendar(market_cap=min_market_cap, limit=limit)
+        if df is None or df.empty:
+            return f"No earnings found between {start} and {end}."
+        if "Marketcap" in df.columns:
+            df = df.sort_values("Marketcap", ascending=False, na_position="last")
+
+        rows = []
+        for sym, r in df.head(limit).iterrows():
+            rows.append(
+                {
+                    "symbol": sym,
+                    "company": r.get("Company"),
+                    "marketCap": r.get("Marketcap"),
+                    "event": r.get("Event Name"),
+                    "date": _date(r.get("Event Start Date")),
+                    "timing": r.get("Timing"),
+                    "epsEstimate": r.get("EPS Estimate"),
+                    "reportedEps": r.get("Reported EPS"),
+                    "surprisePercent": r.get("Surprise(%)"),
+                }
+            )
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# Earnings Calendar: {start} to {end}\n\n"
+            result += f"{len(rows)} companies, largest first.\n\n"
+            result += (
+                "| Date | Symbol | Company | Market Cap | Timing | EPS Est. | Reported | Surprise |\n"
+                "|---|---|---|---|---|---|---|---|\n"
+            )
+            for r in rows:
+                result += (
+                    f"| {r['date']} | {r['symbol']} | {r['company']} | {format_large_number(r['marketCap'])} | "
+                    f"{r['timing'] or '-'} | {_num(r['epsEstimate'])} | {_num(r['reportedEps'])} | "
+                    f"{_num(r['surprisePercent'], '+.2f', '%')} |\n"
+                )
+            return truncate_response(
+                result, "Lower the limit or narrow the date range."
+            )
+        else:
+            payload = {
+                "start": str(start),
+                "end": str(end),
+                "count": len(rows),
+                "earnings": rows,
+            }
+            return truncate_json_response(
+                _json(payload), "Lower the limit or narrow the date range."
+            )
+
+    except Exception as e:
+        return _error("earnings calendar", start_date or "today", e)
+
+
+@mcp.tool(
+    name="screen_stocks",
+    annotations={
+        "title": "Run a Yahoo Finance Stock Screener",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+@offload
+def screen_stocks(
+    screener: Annotated[
+        Screener,
+        Field(
+            description=(
+                "Predefined Yahoo screener. Stocks: day_gainers, day_losers, most_actives, most_shorted_stocks, "
+                "small_cap_gainers, aggressive_small_caps, growth_technology_stocks, undervalued_growth_stocks, "
+                "undervalued_large_caps. ETFs: top_etfs_us, top_performing_etfs, technology_etfs, bond_etfs. "
+                "Mutual funds: top_mutual_funds, solid_large_growth_funds, solid_midcap_growth_funds, "
+                "conservative_foreign_funds, high_yield_bond, portfolio_anchors."
+            )
+        ),
+    ],
+    count: Annotated[
+        int,
+        Field(description="Number of results (1-100)", ge=1, le=100),
+    ] = 25,
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Run one of Yahoo Finance's predefined screeners and return the matching symbols with price, % change, volume relative to the 3-month average, market cap, trailing and forward P/E, and 52-week range.
+
+    Use to discover candidates: today's movers, unusual volume, heavily shorted names, undervalued growth or large caps, or top ETFs and funds. Results are live and change through the trading day. Follow up on a symbol with get_stock_quote, get_company_info or get_earnings.
+
+    Returns Markdown by default, or JSON when response_format='json'.
+    """
+    try:
+        session = _get_session()
+        kw = {"session": session} if session is not None else {}
+        res = yf.screen(screener.value, count=count, **kw) or {}
+        quotes = (res.get("quotes") or [])[:count]
+        if not quotes:
+            return f"The '{screener.value}' screener returned no results right now."
+
+        rows = []
+        for q in quotes:
+            vol = q.get("regularMarketVolume")
+            avg = q.get("averageDailyVolume3Month")
+            rows.append(
+                {
+                    "symbol": q.get("symbol"),
+                    "name": q.get("longName") or q.get("shortName"),
+                    "type": q.get("quoteType"),
+                    "price": q.get("regularMarketPrice"),
+                    "changePercent": q.get("regularMarketChangePercent"),
+                    "volume": vol,
+                    "relativeVolume": round(vol / avg, 2) if vol and avg else None,
+                    "marketCap": q.get("marketCap"),
+                    "trailingPE": q.get("trailingPE"),
+                    "forwardPE": q.get("forwardPE"),
+                    "fiftyTwoWeekLow": q.get("fiftyTwoWeekLow"),
+                    "fiftyTwoWeekHigh": q.get("fiftyTwoWeekHigh"),
+                    "exchange": q.get("fullExchangeName") or q.get("exchange"),
+                }
+            )
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# Screener: {res.get('title') or screener.value}\n\n"
+            if res.get("description"):
+                result += f"{res['description']}\n\n"
+            result += (
+                f"Showing {len(rows)} of {res.get('total', len(rows))} matches.\n\n"
+            )
+            result += (
+                "| Symbol | Name | Price | Change | Rel. Vol | Market Cap | P/E | Fwd P/E | 52w Range |\n"
+                "|---|---|---|---|---|---|---|---|---|\n"
+            )
+            for r in rows:
+                result += (
+                    f"| {r['symbol']} | {r['name'] or ''} | {_num(r['price'])} | "
+                    f"{_num(r['changePercent'], '+.2f', '%')} | {_num(r['relativeVolume'], '.2f', 'x')} | "
+                    f"{format_large_number(r['marketCap'])} | {_num(r['trailingPE'])} | {_num(r['forwardPE'])} | "
+                    f"{_num(r['fiftyTwoWeekLow'])} - {_num(r['fiftyTwoWeekHigh'])} |\n"
+                )
+            return truncate_response(result, "Lower the count.")
+        else:
+            payload = {
+                "screener": screener.value,
+                "title": res.get("title"),
+                "total": res.get("total"),
+                "count": len(rows),
+                "results": rows,
+            }
+            return truncate_json_response(_json(payload), "Lower the count.")
+
+    except Exception as e:
+        return _error("screener results", screener.value, e)
+
+
+@mcp.tool(
+    name="get_fund_data",
+    annotations={
+        "title": "Get ETF or Mutual Fund Data",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+@offload
+def get_fund_data(
+    ticker: Annotated[
+        str,
+        Field(
+            description="ETF or mutual fund symbol (e.g., 'SPY', 'QQQ', 'VTI', 'VFIAX')",
+            min_length=1,
+            max_length=10,
+        ),
+    ],
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """What an ETF or mutual fund holds and costs: category and fund family, expense ratio and turnover against its category average, top holdings with weights, sector weightings, and asset-class split (stock, bond, cash).
+
+    Use for "what's in SPY", fund overlap and concentration checks, or comparing fund costs. Not for individual stocks: use get_company_info for those.
+
+    Returns Markdown by default, or JSON when response_format='json'. A symbol that is not a fund returns a short message.
+    """
+    ticker = _norm_ticker(ticker)
+    try:
+        fd = make_ticker(ticker).funds_data
+
+        def safe(attr, default=None):
+            try:
+                value = getattr(fd, attr)
+                return default if value is None else value
+            except Exception:
+                return default
+
+        overview = safe("fund_overview", {})
+        holdings = safe("top_holdings")
+        if not overview and (holdings is None or holdings.empty):
+            return f"No fund data available for {ticker}. It may be a stock rather than an ETF or mutual fund."
+
+        description = safe("description", "")
+        sectors = safe("sector_weightings", {})
+        assets = safe("asset_classes", {})
+        ops = safe("fund_operations")
+        operations = {}
+        if ops is not None and not ops.empty:
+            for attr, row in ops.iterrows():
+                vals = row.tolist()
+                operations[str(attr)] = {
+                    "fund": vals[0] if len(vals) > 0 else None,
+                    "categoryAverage": vals[1] if len(vals) > 1 else None,
+                }
+        top = []
+        if holdings is not None and not holdings.empty:
+            for sym, row in holdings.iterrows():
+                top.append(
+                    {
+                        "symbol": sym,
+                        "name": row.get("Name"),
+                        "weight": row.get("Holding Percent"),
+                    }
+                )
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# Fund Data: {ticker}\n\n"
+            if overview:
+                result += f"- **Category:** {overview.get('categoryName', 'N/A')}\n"
+                result += f"- **Family:** {overview.get('family', 'N/A')}\n"
+                result += f"- **Type:** {overview.get('legalType', 'N/A')}\n"
+            er = operations.get("Annual Report Expense Ratio")
+            if er and _num(er["fund"]) != "-":
+                result += f"- **Expense ratio:** {er['fund'] * 100:.3f}%"
+                if _num(er["categoryAverage"]) != "-":
+                    result += f" (category average {er['categoryAverage'] * 100:.2f}%)"
+                result += "\n"
+            to = operations.get("Annual Holdings Turnover")
+            if to and _num(to["fund"]) != "-":
+                result += f"- **Turnover:** {to['fund'] * 100:.1f}%\n"
+            if description:
+                result += f"\n{description[:600]}\n"
+            if top:
+                result += (
+                    "\n## Top Holdings\n\n| Symbol | Name | Weight |\n|---|---|---|\n"
+                )
+                for h in top:
+                    w = h["weight"] * 100 if _num(h["weight"]) != "-" else None
+                    result += (
+                        f"| {h['symbol']} | {h['name']} | {_num(w, '.2f', '%')} |\n"
+                    )
+            if sectors:
+                result += "\n## Sector Weightings\n\n"
+                for k, v in sorted(sectors.items(), key=lambda kv: -(kv[1] or 0)):
+                    if v:
+                        result += (
+                            f"- **{k.replace('_', ' ').title()}:** {v * 100:.1f}%\n"
+                        )
+            if assets:
+                result += "\n## Asset Classes\n\n"
+                for k, v in assets.items():
+                    if v:
+                        result += f"- **{k.replace('Position', '').title()}:** {v * 100:.1f}%\n"
+            return truncate_response(result, "")
+        else:
+            payload = {
+                "ticker": ticker,
+                "overview": overview,
+                "description": description,
+                "operations": operations,
+                "topHoldings": top,
+                "sectorWeightings": sectors,
+                "assetClasses": assets,
+            }
+            return truncate_json_response(_json(payload), "")
+
+    except Exception as e:
+        return _error("fund data", ticker, e)
+
+
+@mcp.tool(
+    name="get_sector_overview",
+    annotations={
+        "title": "Get Sector or Industry Overview",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+@offload
+def get_sector_overview(
+    sector: Annotated[
+        SectorKey,
+        Field(
+            description=(
+                "Sector key: basic-materials, communication-services, consumer-cyclical, consumer-defensive, "
+                "energy, financial-services, healthcare, industrials, real-estate, technology, utilities"
+            )
+        ),
+    ],
+    industry: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional industry key inside the sector (e.g., 'semiconductors', 'software-infrastructure'). "
+                "Call once without it: the sector response lists every valid industry key."
+            ),
+            max_length=80,
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        Field(description="Rows per company list (1-50)", ge=1, le=50),
+    ] = 10,
+    response_format: Annotated[
+        ResponseFormat,
+        Field(
+            description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+        ),
+    ] = ResponseFormat.MARKDOWN,
+) -> str:
+    """Overview of a market sector, or of one industry inside it: description, company count, total market cap, market weight, and the largest companies with analyst rating. A sector also lists its industries with their keys and weights; an industry adds its top growth companies (growth estimate) and top performers (YTD return, target price).
+
+    Use for sector rotation, "biggest semiconductor companies", finding peers for a stock, or exploring an industry before picking names. Call without industry first, then pass one of the returned industry keys.
+
+    Returns Markdown by default, or JSON when response_format='json'. An unknown industry key returns a short message listing the valid ones.
+    """
+    try:
+        session = _get_session()
+        kw = {"session": session} if session is not None else {}
+        sec = yf.Sector(sector.value, **kw)
+
+        if industry:
+            key = (
+                industry.strip()
+                .lower()
+                .replace(" & ", "-")
+                .replace(" - ", "-")
+                .replace(" ", "-")
+            )
+            valid = list(sec.industries.index) if sec.industries is not None else []
+            if valid and key not in valid:
+                return (
+                    f"'{industry}' is not an industry in {sector.value}. Valid keys: "
+                    + ", ".join(valid)
+                )
+            obj = yf.Industry(key, **kw)
+            label = f"{obj.name} ({sec.name})"
+            lists = {
+                "topCompanies": _records(obj.top_companies, limit),
+                "topGrowthCompanies": _records(obj.top_growth_companies, limit),
+                "topPerformingCompanies": _records(obj.top_performing_companies, limit),
+            }
+        else:
+            obj = sec
+            label = sec.name
+            lists = {
+                "topCompanies": _records(sec.top_companies, limit),
+                "industries": _records(sec.industries, 200),
+            }
+
+        overview = obj.overview or {}
+        if not overview and not any(lists.values()):
+            return f"No data available for {label}."
+
+        if response_format == ResponseFormat.MARKDOWN:
+            result = f"# {'Industry' if industry else 'Sector'}: {label}\n\n"
+            if overview.get("description"):
+                result += f"{overview['description']}\n\n"
+            if overview.get("companies_count") is not None:
+                result += f"- **Companies:** {overview['companies_count']}\n"
+            if overview.get("market_cap") is not None:
+                result += (
+                    f"- **Market cap:** {format_large_number(overview['market_cap'])}\n"
+                )
+            if _num(overview.get("market_weight")) != "-":
+                result += (
+                    f"- **Market weight:** {overview['market_weight'] * 100:.2f}%\n"
+                )
+            titles = {
+                "topCompanies": "Largest Companies",
+                "topGrowthCompanies": "Top Growth Companies",
+                "topPerformingCompanies": "Top Performers",
+                "industries": "Industries",
+            }
+            for k, rows in lists.items():
+                if not rows:
+                    continue
+                result += f"\n## {titles[k]}\n\n"
+                cols = list(rows[0].keys())
+                result += "| " + " | ".join(cols) + " |\n|" + "---|" * len(cols) + "\n"
+                for r in rows:
+                    cells = [
+                        _num(r[c], ".4g") if isinstance(r[c], float) else str(r[c])
+                        for c in cols
+                    ]
+                    result += "| " + " | ".join(cells) + " |\n"
+            return truncate_response(result, "Lower the limit.")
+        else:
+            payload = {
+                "sector": sector.value,
+                "industry": industry,
+                "name": label,
+                "overview": overview,
+                **lists,
+            }
+            return truncate_json_response(_json(payload), "Lower the limit.")
+
+    except Exception as e:
+        return _error("sector overview", industry or sector.value, e)
 # ============================================================================
 # RUN SERVER
 # ============================================================================

@@ -24,6 +24,10 @@ Real-time stock market data for Claude Desktop and any MCP-compatible client, po
 - 🔮 **Forward analyst estimates** (price targets, EPS/revenue, growth)
 - 🔎 **Symbol search** by company name or keyword
 - 🕒 **Market status** (open/closed) and index summary
+- 📅 **Earnings dates**: next report, beat/miss history, and a market-wide earnings calendar
+- 🧲 **Stock screeners**: day gainers/losers, most active, most shorted, undervalued growth, top ETFs
+- 🧺 **ETF and fund data**: holdings, expense ratio, sector weights
+- 🏭 **Sector and industry overviews** with their largest, fastest-growing and best-performing companies
 
 Every tool returns human-readable **markdown** by default, or structured **JSON** on request (`response_format: "json"`). Requests share a single browser-impersonating HTTP session to reduce Yahoo Finance rate-limiting.
 
@@ -70,7 +74,7 @@ others only take a URL. n8n's **MCP Client Tool** node is the second kind - it
 offers HTTP Streamable and SSE and no way to launch a command - so stdio alone
 puts the server out of reach.
 
-`--http` serves the same 13 tools over Streamable HTTP at `/mcp`:
+`--http` serves the same 18 tools over Streamable HTTP at `/mcp`:
 
 ```bash
 npx -y yahoo-finance-mcp-server --http
@@ -121,6 +125,11 @@ arriving under an unlisted name gets `421 Misdirected Request`.
 | `get_analyst_estimates` | Forward price targets, EPS/revenue estimates by period, and growth estimates | `ticker` |
 | `search_symbols` | Find ticker symbols by company name or keyword | `query`, `count` |
 | `get_market_status` | Whether a market is open/closed, with timing and a major-index summary | `region` |
+| `get_earnings` | Next earnings date (days away, EPS and revenue estimates), ex-dividend date, beat/miss history | `ticker`, `limit` |
+| `get_earnings_calendar` | Every company reporting in a date range, with timing and EPS estimate | `start_date`, `end_date`, `min_market_cap`, `limit` |
+| `screen_stocks` | Results of a Yahoo predefined screener with price, change, relative volume, P/E | `screener`, `count` |
+| `get_fund_data` | ETF or mutual fund holdings, expense ratio, sector weights, asset classes | `ticker` |
+| `get_sector_overview` | Sector or industry overview, largest companies, industries, top growers and performers | `sector`, `industry`, `limit` |
 
 Every tool also accepts `response_format` (`"markdown"`, the default, or `"json"`).
 
@@ -131,7 +140,11 @@ Every tool also accepts `response_format` (`"markdown"`, the default, or `"json"
 
 **`get_options_chain`:** call without `expiration_date` to list available dates, then again with a date. `option_type` is `calls`, `puts`, or `both`.
 
-**`get_holders`:** `holder_type` is `institutional`, `mutualfund`, `major`, or `insider_transactions`.
+**`get_holders`:** `holder_type` is `institutional`, `mutualfund`, `major`, `insider_transactions`, `insider_purchases` (6-month net insider buying), or `insider_roster`.
+
+**`screen_stocks`:** `screener` is one of `day_gainers`, `day_losers`, `most_actives`, `most_shorted_stocks`, `small_cap_gainers`, `aggressive_small_caps`, `growth_technology_stocks`, `undervalued_growth_stocks`, `undervalued_large_caps`, `top_etfs_us`, `top_performing_etfs`, `technology_etfs`, `bond_etfs`, `top_mutual_funds`, `solid_large_growth_funds`, `solid_midcap_growth_funds`, `conservative_foreign_funds`, `high_yield_bond`, `portfolio_anchors`.
+
+**`get_sector_overview`:** `sector` is one of `basic-materials`, `communication-services`, `consumer-cyclical`, `consumer-defensive`, `energy`, `financial-services`, `healthcare`, `industrials`, `real-estate`, `technology`, `utilities`. Call without `industry` to get the list of industry keys.
 
 ## 💬 Example Prompts
 
@@ -147,6 +160,12 @@ Once the server is connected, just ask Claude:
 - "Show me the SPY call options expiring next month"
 - "Who are the biggest institutional holders of Apple?"
 - "What's Coca-Cola's dividend history?"
+- "When does NVIDIA report next, and has it been beating estimates?"
+- "Which large caps report earnings this week?"
+- "What are today's biggest gainers?"
+- "What's inside QQQ and what does it cost?"
+- "Who are the biggest semiconductor companies?"
+- "Are Tesla insiders net buying or selling?"
 
 ## 🐛 Troubleshooting
 

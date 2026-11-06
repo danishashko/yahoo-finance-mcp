@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-11-06
+
+### Added
+
+- `get_earnings`: the next earnings date with days until it, consensus EPS and
+  revenue ranges, the next ex-dividend date, and the beat/miss history with
+  surprise %.
+- `get_earnings_calendar`: every company reporting in a date range, largest
+  first, with BMO/AMC timing, EPS estimate and, once reported, the surprise.
+- `screen_stocks`: Yahoo's 19 predefined screeners (day gainers and losers,
+  most active, most shorted, undervalued growth and large caps, top ETFs and
+  funds) with relative volume, P/E and 52-week range.
+- `get_fund_data`: ETF and mutual fund holdings, expense ratio and turnover
+  against the category average, sector weights and asset classes.
+- `get_sector_overview`: a sector or one of its industries, with its largest
+  companies, its industries, top growth companies and top performers.
+- `get_holders` gains `insider_purchases` (6-month net insider buying) and
+  `insider_roster` (each insider and their stake).
+- Server instructions: a client now receives a short map of which tool answers
+  what on connect.
+- `llms.txt` and `AGENTS.md` for agents using or working on the server.
+- `serverInfo.version` now reports this server's version. It reported the MCP
+  SDK's version (1.27.2) instead.
+
+### Changed
+
+- yfinance minimum raised to 1.8, the version these tools were tested on. The
+  earnings calendar does not exist before 1.0.
+
 ## [1.3.1] - 2026-09-08
 
 ### Fixed

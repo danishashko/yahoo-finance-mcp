@@ -1,0 +1,39 @@
+# Yahoo Finance MCP Server
+
+> Read-only Yahoo Finance market data over the Model Context Protocol. Free, no API key. Runs locally over stdio (`npx -y yahoo-finance-mcp-server`) or over Streamable HTTP (`--http`, endpoint `/mcp`). 18 tools; every tool accepts `response_format` = `markdown` (default) or `json`.
+
+Registry name: `io.github.danishashko/yahoo-finance-mcp`. npm package: `yahoo-finance-mcp-server`. Requires Python 3.10+ and Node.js 16+; the npx wrapper builds its own Python environment on first run.
+
+## Start here
+
+- [README](https://github.com/danishashko/yahoo-finance-mcp/blob/main/README.md): install, client config, full tool table
+- [CHANGELOG](https://github.com/danishashko/yahoo-finance-mcp/blob/main/CHANGELOG.md): what changed per version
+- [server.json](https://github.com/danishashko/yahoo-finance-mcp/blob/main/server.json): MCP registry manifest
+
+## Tools
+
+- `search_symbols`: company name or keyword to ticker. Use first when you only have a name.
+- `get_stock_quote`: current price, change, ranges, volume, market cap, P/E, dividend yield.
+- `get_historical_prices`: OHLCV history by `period` and `interval`.
+- `get_company_info`: business summary, officers, valuation and financial highlights.
+- `get_financial_statements`: annual income statement, balance sheet, cash flow.
+- `compare_stocks`: 2 to 10 tickers side by side.
+- `get_analyst_recommendations`: price targets, consensus, upgrades and downgrades.
+- `get_analyst_estimates`: forward EPS, revenue and growth estimates.
+- `get_earnings`: next earnings date, days until it, estimates, beat/miss history.
+- `get_earnings_calendar`: every company reporting in a date range, largest first.
+- `screen_stocks`: Yahoo predefined screeners (gainers, losers, most active, most shorted, undervalued, top ETFs and funds).
+- `get_sector_overview`: sector or industry with its largest, fastest-growing and best-performing companies.
+- `get_fund_data`: ETF or mutual fund holdings, expense ratio, sector weights, asset classes.
+- `get_holders`: institutional, mutual-fund or major holders, insider trades, 6-month net insider buying, insider roster.
+- `get_dividends_splits`: dividend and split history.
+- `get_options_chain`: expiration dates, then calls and puts for one date.
+- `get_market_news`: latest headlines for a ticker.
+- `get_market_status`: whether a market is open, with an index summary.
+
+## Limits
+
+- Data can be delayed about 15 minutes. Yahoo rate-limits bursts; a rate-limit reply says so, wait and retry.
+- Responses are capped at 25,000 characters. JSON replies that would exceed it say so instead of being cut mid-document.
+- Nothing is written anywhere. All tools are read-only and idempotent except `screen_stocks`, whose results move during the trading day.
+- Not investment advice.
