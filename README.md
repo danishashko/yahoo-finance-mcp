@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Real-time stock market data for Claude Desktop and any MCP-compatible client, powered by Yahoo Finance. Get quotes, historical prices, company profiles, financial statements, analyst ratings, and multi-stock comparisons, all from natural language.
+Free Yahoo Finance MCP server with no API key. 18 read-only tools give Claude, Claude Code, Cursor, VS Code, Windsurf, Codex, n8n or any other MCP client live stock quotes, historical prices, financial statements, earnings dates and calendars, analyst ratings and estimates, options chains, insider and institutional holders, stock screeners, ETF and fund holdings, sector overviews and market news. Runs locally with one `npx` command, over stdio or Streamable HTTP.
 
 > **npm package:** [`yahoo-finance-mcp-server`](https://www.npmjs.com/package/yahoo-finance-mcp-server) &nbsp;·&nbsp; **GitHub repo:** [`danishashko/yahoo-finance-mcp`](https://github.com/danishashko/yahoo-finance-mcp). The repo name is shorter than the package name; both refer to this project.
 
@@ -50,6 +50,40 @@ Add this to your Claude Desktop config and restart Claude:
 ```
 
 That is it. On first launch the npx wrapper creates an isolated Python environment and installs the dependencies for you (a one-time step that can take a minute). You only need **Python 3.10+** and **Node.js 16+** on your machine.
+
+### Other clients
+
+**Claude Code**
+
+```bash
+claude mcp add yahoo-finance -- npx -y yahoo-finance-mcp-server
+```
+
+**Cursor** (`~/.cursor/mcp.json`), **Windsurf** (`~/.codeium/windsurf/mcp_config.json`) and **Gemini CLI** (`~/.gemini/settings.json`) take the same `mcpServers` block as Claude Desktop above.
+
+**VS Code** (`.vscode/mcp.json`)
+
+```json
+{
+  "servers": {
+    "yahoo-finance": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "yahoo-finance-mcp-server"]
+    }
+  }
+}
+```
+
+**Codex CLI** (`~/.codex/config.toml`)
+
+```toml
+[mcp_servers.yahoo-finance]
+command = "npx"
+args = ["-y", "yahoo-finance-mcp-server"]
+```
+
+**n8n and other URL-only clients:** see [HTTP mode](#-http-mode-n8n-remote-agents-anything-that-connects-to-a-url).
 
 ### Prefer a global install?
 
@@ -169,6 +203,29 @@ Once the server is connected, just ask Claude:
 - "Who are the biggest semiconductor companies?"
 - "Are Tesla insiders net buying or selling?"
 
+## ❓ FAQ
+
+**Does it need an API key or a paid plan?**
+No. It reads Yahoo Finance's public data through the `yfinance` library. There is no key, account or signup.
+
+**Is the data real-time?**
+Quotes are near real-time for most US stocks and can be delayed about 15 minutes on some exchanges. Every quote states its exchange, market state and timestamp.
+
+**Which tickers work?**
+Any symbol Yahoo Finance lists: US stocks (`AAPL`), class shares (`BRK.B` or `BRK-B`), non-US listings with Yahoo's exchange suffix (`7203.T`, `BP.L`, `SAP.DE`), ETFs and mutual funds (`SPY`, `VFIAX`), indices (`^GSPC`), crypto (`BTC-USD`) and currencies (`EURUSD=X`). Case does not matter. If you only have a company name, `search_symbols` finds the ticker.
+
+**Can it place trades or change anything?**
+No. Every tool is read-only.
+
+**Does it work with clients other than Claude?**
+Yes. It speaks standard MCP, so any client that supports MCP over stdio or Streamable HTTP can use it. Setup for the common ones is under [Quick Start](#-quick-start).
+
+**How do agents get structured data?**
+Every result carries typed `structuredContent` matching the tool's `outputSchema`, whatever text format was asked for. Pass `response_format: "json"` to get JSON text as well.
+
+**Where is the machine-readable summary?**
+[`llms.txt`](llms.txt) lists every tool, limit and error behaviour in one page for agents.
+
 ## 🐛 Troubleshooting
 
 **"Command not found" / "Python not found"**
@@ -240,13 +297,13 @@ On Windows use `"command": "python"` and a path like `"C:\\path\\to\\yahoo_finan
 
 ## 📝 Notes
 
-- Use ticker symbols in uppercase (`AAPL`, `MSFT`, `TSLA`).
+- Tickers are case-insensitive, and `BRK.B` is accepted as well as Yahoo's `BRK-B`.
 - Some quotes may be delayed 15 to 20 minutes.
 - Financial statements are generally available for larger public companies.
 
 ## 📋 Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for the full version history. The core fixes (tool input validation, analyst recommendations, dividend yield, working `npx` install) landed in **v1.1.0**.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 ## 📚 Resources
 
