@@ -31,7 +31,7 @@ from mcp.types import CallToolResult, TextContent
 # stderr stream of an MCP stdio server. The JSON-RPC channel is stdout only.
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 # Initialize the MCP server
 mcp = MCPServer(
@@ -1507,7 +1507,7 @@ def get_analyst_recommendations(
 ) -> str:
     """Wall Street analyst view on one stock: price targets (high/mean/low), consensus rating, the buy/hold/sell recommendation-trend breakdown, and recent upgrades/downgrades.
 
-    Use for "what do analysts think of X", ratings, or sentiment. For forward EPS/revenue/growth projections use get_analyst_estimates instead: this tool is ratings and targets, that one is the numeric estimates.
+    Use for "what do analysts think of X", ratings, or sentiment. For forward EPS/revenue/growth projections use get_analyst_estimates instead: this tool is ratings and targets, that one is the numeric estimates. Not for news-driven sentiment (use get_market_news). Small caps often have few or no covering analysts, so a thin consensus carries little weight.
 
     Returns Markdown by default, or JSON when response_format='json'. A stock with no analyst coverage returns the available fields as N/A; errors return a short message.
     """
@@ -1945,7 +1945,7 @@ def get_holders(
 ) -> str:
     """Ownership and insider activity for one stock, selected by holder_type: 'institutional' (top institutional holders), 'mutualfund' (top fund holders), 'major' (insider-vs-institutional ownership % breakdown), 'insider_transactions' (recent insider buys and sells, one row per trade), 'insider_purchases' (net insider buying vs selling over the last 6 months), or 'insider_roster' (each insider, their position and shares held).
 
-    Use for "who owns X", institutional ownership, or insider trading activity. One holder_type per call: call again to get a different view.
+    Use for "who owns X", institutional ownership, or insider trading activity. One holder_type per call: call again to get a different view. Not for share count, float or valuation (use get_company_info) or for analyst opinion (use get_analyst_recommendations). Institutional and fund holdings come from quarterly filings, so they can be a few months old; insider trades are filed within days and are the fresher signal.
 
     Returns Markdown by default, or JSON when response_format='json'. Missing data for the chosen category returns a short message.
     """
@@ -2251,7 +2251,7 @@ def search_symbols(
 ) -> str:
     """Resolve a company name or keyword to ticker symbols; each match returns the symbol, name, exchange, and instrument type (equity, ETF, and so on).
 
-    Use this first when you have a company or brand name but not its ticker, then pass the resolved symbol to the other tools. Not for fetching prices or fundamentals.
+    Use this first when you have a company or brand name but not its ticker, then pass the resolved symbol to the other tools. Skip it when you already have a valid ticker. Not for fetching prices or fundamentals. A name often matches several listings (the US share, foreign listings, ETFs): choose by exchange and type, not just the first row.
 
     query is the name/keyword to search; count caps the number of matches (1-20, default 8). Returns Markdown by default, or JSON when response_format='json'. No matches returns a short message.
     """
@@ -2333,7 +2333,7 @@ def get_market_status(
 ) -> str:
     """Whether a stock market is currently open or closed for a given region, with trading-session timing and a summary of that region's major indices.
 
-    Use for "is the US market open", market hours, or a quick index overview. region is a country code (US, GB, CA, DE, FR, IN, JP, HK, AU; default US). This is market-wide, not per-stock: use get_stock_quote for an individual price.
+    Use for "is the US market open", market hours, or a quick index overview. region is one of US (default), GB, ASIA or EUROPE for equity markets, or RATES, COMMODITIES, CURRENCIES or CRYPTOCURRENCIES for those asset classes; other country codes are not accepted. This is market-wide, not per-stock: use get_stock_quote for an individual price, and get_sector_overview for sector performance.
 
     Returns Markdown by default, or JSON when response_format='json'. An unrecognized region returns a short message.
     """
@@ -2500,7 +2500,7 @@ def get_earnings(
 ) -> str:
     """Next earnings date for one stock (with days until it, consensus EPS and revenue range) plus its earnings history: each past report's EPS estimate, reported EPS and surprise %. Also returns the next ex-dividend date.
 
-    Use before opening or holding a position through earnings, to check the earnings track record (beats vs misses), or for "when does X report". For forward EPS/revenue estimates by period use get_analyst_estimates; for every company reporting in a date range use get_earnings_calendar.
+    Use before opening or holding a position through earnings, to check the earnings track record (beats vs misses), or for "when does X report". For forward EPS/revenue estimates by period use get_analyst_estimates; for every company reporting in a date range use get_earnings_calendar; for full income statements use get_financial_statements. limit counts upcoming and past dates together, newest first.
 
     Returns Markdown by default, or JSON when response_format='json'. A symbol with no earnings (an ETF, an index) returns a short message.
     """
@@ -2755,7 +2755,7 @@ def screen_stocks(
 ) -> str:
     """Run one of Yahoo Finance's predefined screeners and return the matching symbols with price, % change, volume relative to the 3-month average, market cap, trailing and forward P/E, and 52-week range.
 
-    Use to discover candidates: today's movers, unusual volume, heavily shorted names, undervalued growth or large caps, or top ETFs and funds. Results are live and change through the trading day. Follow up on a symbol with get_stock_quote, get_company_info or get_earnings.
+    Use to discover candidates you don't have yet: today's movers, unusual volume, heavily shorted names, undervalued growth or large caps, or top ETFs and funds. Not for a symbol you already know (use get_stock_quote) and not for custom filters: only Yahoo's predefined screeners exist, so pick the closest one. Results are live and reorder through the trading day, so two calls minutes apart can differ. count takes the top N in the screener's own ranking; there is no paging. Follow up on a symbol with get_stock_quote, get_company_info or get_earnings.
 
     Returns Markdown by default, or JSON when response_format='json'.
     """

@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-11-07
+
+### Fixed
+
+- `get_market_status` described regions (CA, DE, FR, IN, JP, HK, AU) that it
+  does not accept. The description now lists the real values: US, GB, ASIA,
+  EUROPE, RATES, COMMODITIES, CURRENCIES and CRYPTOCURRENCIES.
+- README: the package and repo line showed a literal `&nbsp;` on sites that
+  do not render HTML entities.
+
+### Changed
+
+- Clearer tool descriptions for `screen_stocks`, `get_holders`,
+  `search_symbols`, `get_earnings` and `get_analyst_recommendations`: when not
+  to use each tool and which tool to use instead, how fresh the data is, and
+  how `count` and `limit` behave. No change to inputs or outputs.
+
 ## [1.6.0] - 2026-11-06
 
 ### Added

@@ -7,7 +7,7 @@
 
 Free Yahoo Finance MCP server with no API key. 18 read-only tools give Claude, Claude Code, Cursor, VS Code, Windsurf, Codex, n8n or any other MCP client live stock quotes, historical prices, financial statements, earnings dates and calendars, analyst ratings and estimates, options chains, insider and institutional holders, stock screeners, ETF and fund holdings, sector overviews and market news. Runs locally with one `npx` command, over stdio or Streamable HTTP.
 
-> **npm package:** [`yahoo-finance-mcp-server`](https://www.npmjs.com/package/yahoo-finance-mcp-server) &nbsp;·&nbsp; **GitHub repo:** [`danishashko/yahoo-finance-mcp`](https://github.com/danishashko/yahoo-finance-mcp). The repo name is shorter than the package name; both refer to this project.
+> **npm package:** [`yahoo-finance-mcp-server`](https://www.npmjs.com/package/yahoo-finance-mcp-server) · **GitHub repo:** [`danishashko/yahoo-finance-mcp`](https://github.com/danishashko/yahoo-finance-mcp). The repo name is shorter than the package name; both refer to this project.
 
 ## 🎯 What You Get
 
