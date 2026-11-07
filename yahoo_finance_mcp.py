@@ -31,7 +31,7 @@ from mcp.types import CallToolResult, TextContent
 # stderr stream of an MCP stdio server. The JSON-RPC channel is stdout only.
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 # Initialize the MCP server
 mcp = MCPServer(
@@ -279,6 +279,14 @@ def _market_line(info: Dict[str, Any]) -> str:
 def safe_get(data: Dict[str, Any], key: str, default: Any = "N/A") -> Any:
     """Safely get a value from a dictionary."""
     return data.get(key, default)
+
+
+def _info_price(info: Dict[str, Any]) -> Any:
+    """Last price from .info. ETFs, funds and indices have no currentPrice, only regularMarketPrice."""
+    for key in ("currentPrice", "regularMarketPrice"):
+        if info.get(key) is not None:
+            return info[key]
+    return "N/A"
 
 
 def format_currency(value: Any, currency: str = "USD") -> str:
@@ -933,15 +941,22 @@ def get_stock_quote(
         cur = info.get("currency") or "USD"
 
         # Get fast info for real-time data
+        # fast_info's own previousClose is the chart-window close and can be a day
+        # stale (SPY on 2026-11-06: 730.22 vs the real 733.00), so the regular-market
+        # previous close always wins.
         try:
             fast_info = ticker_obj.fast_info
-            current_price = fast_info.get("lastPrice", safe_get(info, "currentPrice"))
-            previous_close = fast_info.get(
-                "previousClose", safe_get(info, "previousClose")
+            current_price = fast_info.get("lastPrice") or _info_price(info)
+            previous_close = (
+                info.get("regularMarketPreviousClose")
+                or fast_info.get("regularMarketPreviousClose")
+                or safe_get(info, "previousClose")
             )
         except Exception:
-            current_price = safe_get(info, "currentPrice")
-            previous_close = safe_get(info, "previousClose")
+            current_price = _info_price(info)
+            previous_close = info.get("regularMarketPreviousClose") or safe_get(
+                info, "previousClose"
+            )
 
         # Calculate change
         if current_price != "N/A" and previous_close != "N/A":
@@ -1409,7 +1424,7 @@ def compare_stocks(
                     "Ticker": ticker,
                     "Name": safe_get(info, "longName", ticker),
                     "Currency": info.get("currency"),
-                    "Price": safe_get(info, "currentPrice"),
+                    "Price": _info_price(info),
                     "Change%": safe_get(info, "regularMarketChangePercent"),
                     "MarketCap": safe_get(info, "marketCap"),
                     "PE": safe_get(info, "trailingPE"),

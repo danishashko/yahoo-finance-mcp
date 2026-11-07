@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-11-07
+
+### Fixed
+
+- `compare_stocks` showed no price for ETFs, mutual funds and indices. They
+  have no `currentPrice` on Yahoo, so the price now falls back to
+  `regularMarketPrice`.
+- `get_stock_quote` could report the wrong day change. It took the previous
+  close from yfinance's `fast_info`, which can be a day stale (SPY on
+  2026-11-06: 730.22 instead of 733.00, so +0.69% instead of +0.31%). It now
+  uses Yahoo's regular-market previous close, and agrees with
+  `compare_stocks`.
+
 ## [1.6.1] - 2026-11-07
 
 ### Fixed

@@ -1,6 +1,6 @@
 {
   "name": "yahoo-finance-mcp-server",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "mcpName": "io.github.danishashko/yahoo-finance-mcp",
   "description": "Free Yahoo Finance MCP server, no API key: stock quotes, historical prices, financials, earnings, analyst ratings, options, holders, screeners, ETFs and news for Claude, Cursor and any MCP client",
   "main": "bin/cli.js",
